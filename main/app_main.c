@@ -1,7 +1,10 @@
+#include "alarm_audio.h"
+#include "alarm_store.h"
 #include "board_display.h"
 #include "rtc_pcf85063.h"
 #include "study_store.h"
 #include "study_ui.h"
+#include "wifi_manager.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -28,6 +31,13 @@ void app_main(void)
         ESP_ERROR_CHECK(rtc_pcf85063_read(&now) ? ESP_OK : ESP_FAIL);
     }
     ESP_ERROR_CHECK(study_store_init(&now));
+    ESP_ERROR_CHECK(alarm_store_init());
+    ESP_ERROR_CHECK(wifi_manager_init());
+
+    err = alarm_audio_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "alarm audio unavailable: %s", esp_err_to_name(err));
+    }
 
     ESP_ERROR_CHECK(board_display_init());
     if (board_display_lock(-1)) {

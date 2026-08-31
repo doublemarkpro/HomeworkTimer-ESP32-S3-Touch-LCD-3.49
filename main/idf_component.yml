@@ -8,3 +8,6 @@ dependencies:
   espressif/esp_lcd_axs15231b:
     version: "2.1.0"
     public: true
+  espressif/esp_codec_dev:
+    version: ">=1.5.7,<2.0.0"
+    public: true

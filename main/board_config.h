@@ -28,6 +28,12 @@
 #define BOARD_RTC_PIN_SDA           GPIO_NUM_47
 #define BOARD_RTC_I2C_ADDRESS       0x51
 
+#define BOARD_AUDIO_PIN_MCLK        GPIO_NUM_7
+#define BOARD_AUDIO_PIN_BCLK        GPIO_NUM_15
+#define BOARD_AUDIO_PIN_WS          GPIO_NUM_46
+#define BOARD_AUDIO_PIN_DIN         GPIO_NUM_6
+#define BOARD_AUDIO_PIN_DOUT        GPIO_NUM_45
+
 #define BOARD_LVGL_TICK_MS          5
 #define BOARD_LVGL_TASK_MIN_MS      5
 #define BOARD_LVGL_TASK_MAX_MS      500
