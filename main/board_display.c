@@ -29,6 +29,10 @@ static i2c_master_bus_handle_t s_touch_bus;
 static i2c_master_dev_handle_t s_touch_device;
 static uint16_t *s_dma_buffer;
 static uint8_t *s_rotated_buffer;
+static lv_point_t s_last_touch_point;
+static uint8_t s_touch_miss_count;
+static bool s_touch_active;
+static int64_t s_last_touch_error_log_us;
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_commands[] = {
     {0x11, (uint8_t[]){0x00}, 0, 100},
@@ -94,22 +98,54 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
     const esp_err_t err = i2c_master_transmit_receive(
         s_touch_device, command, sizeof(command), response, sizeof(response), 100);
     if (err != ESP_OK || response[1] == 0 || response[1] >= 5) {
-        data->state = LV_INDEV_STATE_RELEASED;
+        if (err != ESP_OK && esp_timer_get_time() - s_last_touch_error_log_us > 1000000) {
+            ESP_LOGW(TAG, "touch I2C read failed: %s", esp_err_to_name(err));
+            s_last_touch_error_log_us = esp_timer_get_time();
+        }
+        /*
+         * The controller can occasionally return one empty sample while a
+         * finger is still down. Keep the last point for up to eight 10 ms
+         * polls so LVGL does not lose taps or swipe gestures on a dropout.
+         */
+        if (s_touch_active && s_touch_miss_count < 8) {
+            ++s_touch_miss_count;
+            data->state = LV_INDEV_STATE_PRESSED;
+            data->point = s_last_touch_point;
+        } else {
+            s_touch_active = false;
+            s_touch_miss_count = 0;
+            data->state = LV_INDEV_STATE_RELEASED;
+        }
         return;
     }
 
     uint16_t point_x = ((uint16_t)(response[2] & 0x0F) << 8) | response[3];
     uint16_t point_y = ((uint16_t)(response[4] & 0x0F) << 8) | response[5];
-    if (point_x >= BOARD_LCD_WIDTH) {
-        point_x = BOARD_LCD_WIDTH - 1;
+    if (point_x >= BOARD_LCD_HEIGHT) {
+        point_x = BOARD_LCD_HEIGHT - 1;
     }
-    if (point_y >= BOARD_LCD_HEIGHT) {
-        point_y = BOARD_LCD_HEIGHT - 1;
+    if (point_y >= BOARD_LCD_WIDTH) {
+        point_y = BOARD_LCD_WIDTH - 1;
     }
 
+    /*
+     * LVGL expects coordinates in the unrotated 172 x 640 panel space and
+     * applies the configured 270 degree display transform afterwards. The
+     * touch controller reports X along the 640-pixel edge and Y along the
+     * 172-pixel edge, so the unrotated point is (raw_y, 639 - raw_x).
+     * The resulting screen point is (639 - raw_x, 171 - raw_y), matching the display's
+     * 180 degree orientation.
+     */
+    s_last_touch_point.x = point_y;
+    s_last_touch_point.y = BOARD_LCD_HEIGHT - 1 - point_x;
+    s_touch_miss_count = 0;
+    if (!s_touch_active) {
+        ESP_LOGI(TAG, "touch raw=(%u,%u), screen=(%u,%u)", point_x, point_y,
+                 BOARD_LCD_HEIGHT - 1 - point_x, BOARD_LCD_WIDTH - 1 - point_y);
+    }
+    s_touch_active = true;
     data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = BOARD_LCD_WIDTH - 1 - point_x;
-    data->point.y = BOARD_LCD_HEIGHT - 1 - point_y;
+    data->point = s_last_touch_point;
 }
 
 static void lvgl_tick(void *argument)
@@ -191,6 +227,8 @@ static esp_err_t init_touch(void)
         .flags.enable_internal_pullup = true,
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &s_touch_bus), TAG, "touch I2C bus");
+    ESP_RETURN_ON_ERROR(i2c_master_probe(s_touch_bus, BOARD_TOUCH_I2C_ADDRESS, 100), TAG,
+                        "touch controller probe");
 
     const i2c_device_config_t device_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -273,7 +311,13 @@ static esp_err_t init_panel(lv_display_t **lvgl_display)
                         "display buffers");
     lv_display_set_buffers(display, frame_a, frame_b, BOARD_FRAME_BUFFER_BYTES,
                            LV_DISPLAY_RENDER_MODE_FULL);
-    lv_display_set_rotation(display, LV_DISPLAY_ROTATION_90);
+    /*
+     * The panel is mounted with the USB connector on the opposite side from
+     * the preferred desktop orientation. 270 degrees keeps the 640 x 172
+     * landscape layout while rotating both rendering and LVGL's pointer
+     * transform by 180 degrees compared with the previous 90 degree setup.
+     */
+    lv_display_set_rotation(display, LV_DISPLAY_ROTATION_270);
     *lvgl_display = display;
     return ESP_OK;
 }
@@ -295,6 +339,7 @@ esp_err_t board_display_init(void)
     lv_indev_set_type(input, LV_INDEV_TYPE_POINTER);
     lv_indev_set_display(input, display);
     lv_indev_set_read_cb(input, touch_read);
+    lv_timer_set_period(lv_indev_get_read_timer(input), 10);
 
     const esp_timer_create_args_t tick_args = {
         .callback = lvgl_tick,
@@ -311,6 +356,6 @@ esp_err_t board_display_init(void)
         lvgl_task, "lvgl", BOARD_LVGL_TASK_STACK, NULL, BOARD_LVGL_TASK_PRIORITY, NULL, 0);
     ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "LVGL task");
 
-    ESP_LOGI(TAG, "640x172 landscape display ready");
+    ESP_LOGI(TAG, "640x172 landscape display ready (180 degree orientation)");
     return ESP_OK;
 }

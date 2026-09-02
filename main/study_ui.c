@@ -7,6 +7,7 @@
 
 #include "alarm_audio.h"
 #include "alarm_store.h"
+#include "app_settings.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lvgl.h"
@@ -60,6 +61,7 @@ typedef enum {
     SCREEN_TIMER,
     SCREEN_REPORT,
     SCREEN_MENU,
+    SCREEN_SETTINGS,
     SCREEN_SCHEDULE,
     SCREEN_WIFI,
     SCREEN_WIFI_PASSWORD,
@@ -101,6 +103,30 @@ static const char *const s_schedule[5][7] = {
     {"英语", "数学", "语文", "武术", "竖笛", "数学", "—"},
 };
 
+static const char *const s_keyboard_lower_map[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", LV_SYMBOL_BACKSPACE, "\n",
+    "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "\n",
+    "a", "s", "d", "f", "g", "h", "j", "k", "l", "\n",
+    "z", "x", "c", "v", "b", "n", "m", ".", "-", "\n",
+    "ABC", " ", LV_SYMBOL_OK, "",
+};
+
+static const char *const s_keyboard_upper_map[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", LV_SYMBOL_BACKSPACE, "\n",
+    "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "\n",
+    "A", "S", "D", "F", "G", "H", "J", "K", "L", "\n",
+    "Z", "X", "C", "V", "B", "N", "M", ".", "-", "\n",
+    "abc", " ", LV_SYMBOL_OK, "",
+};
+
+static const lv_buttonmatrix_ctrl_t s_keyboard_ctrl_map[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1,
+    LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2, 8, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2,
+};
+
 static active_session_t s_session;
 static screen_id_t s_screen;
 static rtc_datetime_t s_now;
@@ -111,6 +137,7 @@ static lv_obj_t *s_pause_label;
 static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_password_textarea;
 static lv_obj_t *s_alarm_switch;
+static lv_obj_t *s_volume_label;
 static uint32_t s_last_rendered_second = UINT32_MAX;
 static uint8_t s_last_clock_minute = UINT8_MAX;
 static int64_t s_last_rtc_poll_ms;
@@ -128,6 +155,7 @@ static void show_home(void);
 static void show_timer(void);
 static void show_report(void);
 static void show_menu(void);
+static void show_settings(void);
 static void show_schedule(void);
 static void show_wifi(bool start_scan);
 static void show_wifi_password(void);
@@ -199,6 +227,14 @@ static void style_surface(lv_obj_t *object, uint32_t color, uint32_t dark_color,
     lv_obj_set_style_pad_all(object, 0, 0);
 }
 
+static void touch_sound_event(lv_event_t *event)
+{
+    (void)event;
+    if (app_settings_button_sound_enabled()) {
+        alarm_audio_click();
+    }
+}
+
 static lv_obj_t *make_button(lv_obj_t *parent, const char *text, uint32_t color,
                              uint32_t dark_color, int x, int y, int width, int height,
                              lv_event_cb_t callback, void *user_data)
@@ -207,11 +243,14 @@ static lv_obj_t *make_button(lv_obj_t *parent, const char *text, uint32_t color,
     lv_obj_set_pos(button, x, y);
     lv_obj_set_size(button, width, height);
     style_surface(button, color, dark_color, 13, 2);
+    lv_obj_add_event_cb(button, touch_sound_event, LV_EVENT_PRESSED, NULL);
     if (callback != NULL) {
-        lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+        lv_obj_add_event_cb(button, callback, LV_EVENT_PRESSED, user_data);
     }
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_width(label, width - 12);
     lv_obj_set_style_text_font(label, FONT_CJK, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
@@ -228,6 +267,112 @@ static lv_obj_t *make_panel(lv_obj_t *parent, int x, int y, int width, int heigh
     lv_obj_set_size(panel, width, height);
     style_surface(panel, color, dark_color, 12, 1);
     return panel;
+}
+
+static lv_obj_t *make_shape(lv_obj_t *parent, int x, int y, int width, int height,
+                            uint32_t color, lv_opa_t opacity, int radius)
+{
+    lv_obj_t *shape = lv_obj_create(parent);
+    lv_obj_remove_flag(shape, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(shape, x, y);
+    lv_obj_set_size(shape, width, height);
+    lv_obj_set_style_radius(shape, radius, 0);
+    lv_obj_set_style_bg_color(shape, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(shape, opacity, 0);
+    lv_obj_set_style_border_width(shape, 0, 0);
+    lv_obj_set_style_pad_all(shape, 0, 0);
+    return shape;
+}
+
+static void add_book_icon(lv_obj_t *card)
+{
+    make_shape(card, 20, 15, 32, 39, 0xEAF4FF, LV_OPA_COVER, 5);
+    make_shape(card, 56, 15, 32, 39, 0xEAF4FF, LV_OPA_COVER, 5);
+    make_shape(card, 51, 18, 6, 39, 0x82B8FF, LV_OPA_COVER, 2);
+    make_shape(card, 27, 25, 18, 2, COLOR_CHINESE, LV_OPA_50, 1);
+    make_shape(card, 63, 25, 18, 2, COLOR_CHINESE, LV_OPA_50, 1);
+    make_shape(card, 27, 34, 18, 2, COLOR_CHINESE, LV_OPA_50, 1);
+    make_shape(card, 63, 34, 18, 2, COLOR_CHINESE, LV_OPA_50, 1);
+}
+
+static void add_compass_icon(lv_obj_t *card)
+{
+    static const lv_point_precise_t left_leg[] = {{13, 0}, {0, 29}};
+    static const lv_point_precise_t right_leg[] = {{0, 0}, {13, 29}};
+
+    lv_obj_t *left = lv_line_create(card);
+    lv_obj_remove_flag(left, LV_OBJ_FLAG_CLICKABLE);
+    lv_line_set_points(left, left_leg, 2);
+    lv_obj_set_pos(left, 33, 34);
+    lv_obj_set_style_line_width(left, 7, 0);
+    lv_obj_set_style_line_rounded(left, true, 0);
+    lv_obj_set_style_line_color(left, lv_color_hex(0xFFE071), 0);
+
+    lv_obj_t *right = lv_line_create(card);
+    lv_obj_remove_flag(right, LV_OBJ_FLAG_CLICKABLE);
+    lv_line_set_points(right, right_leg, 2);
+    lv_obj_set_pos(right, 62, 34);
+    lv_obj_set_style_line_width(right, 7, 0);
+    lv_obj_set_style_line_rounded(right, true, 0);
+    lv_obj_set_style_line_color(right, lv_color_hex(0xFFE071), 0);
+
+    make_shape(card, 39, 10, 31, 31, 0xFFE071, LV_OPA_COVER, LV_RADIUS_CIRCLE);
+    make_shape(card, 47, 18, 15, 15, COLOR_MATH_2, LV_OPA_COVER, LV_RADIUS_CIRCLE);
+    make_shape(card, 51, 22, 7, 7, 0xFFF2B2, LV_OPA_COVER, LV_RADIUS_CIRCLE);
+}
+
+static void add_english_icon(lv_obj_t *card)
+{
+    lv_obj_t *tile_a = make_shape(card, 39, 10, 31, 29, 0x9B8BFF, LV_OPA_COVER, 6);
+    lv_obj_t *tile_b = make_shape(card, 25, 37, 31, 29, 0x6E5CE7, LV_OPA_COVER, 6);
+    lv_obj_t *tile_c = make_shape(card, 54, 37, 31, 29, 0x7765EF, LV_OPA_COVER, 6);
+    make_label(tile_a, "A", FONT_VALUE, COLOR_TEXT, 0, 2, 31, 24, LV_TEXT_ALIGN_CENTER);
+    make_label(tile_b, "B", FONT_VALUE, COLOR_TEXT, 0, 2, 31, 24, LV_TEXT_ALIGN_CENTER);
+    make_label(tile_c, "C", FONT_VALUE, COLOR_TEXT, 0, 2, 31, 24, LV_TEXT_ALIGN_CENTER);
+}
+
+static void add_cup_icon(lv_obj_t *card)
+{
+    lv_obj_t *handle = lv_obj_create(card);
+    lv_obj_remove_flag(handle, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(handle, 38, 27);
+    lv_obj_set_size(handle, 23, 23);
+    lv_obj_set_style_radius(handle, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(handle, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(handle, 5, 0);
+    lv_obj_set_style_border_color(handle, lv_color_hex(0xA5F1DF), 0);
+    lv_obj_set_style_pad_all(handle, 0, 0);
+
+    make_shape(card, 10, 22, 39, 34, 0xA5F1DF, LV_OPA_COVER, 8);
+    make_shape(card, 16, 16, 3, 8, 0xD9FFF6, LV_OPA_70, 2);
+    make_shape(card, 27, 12, 3, 11, 0xD9FFF6, LV_OPA_70, 2);
+    make_shape(card, 38, 16, 3, 8, 0xD9FFF6, LV_OPA_70, 2);
+}
+
+static lv_obj_t *make_subject_card(lv_obj_t *parent, uint8_t subject, int x,
+                                   uint32_t weekly_minutes, lv_event_cb_t callback)
+{
+    lv_obj_t *card = lv_button_create(parent);
+    lv_obj_set_pos(card, x, 10);
+    lv_obj_set_size(card, 110, 152);
+    style_surface(card, s_subject_colors[subject], s_subject_dark_colors[subject], 14, 2);
+    lv_obj_add_event_cb(card, touch_sound_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(card, callback, LV_EVENT_PRESSED, (void *)(intptr_t)subject);
+
+    if (subject == STUDY_SUBJECT_CHINESE) {
+        add_book_icon(card);
+    } else if (subject == STUDY_SUBJECT_MATH) {
+        add_compass_icon(card);
+    } else {
+        add_english_icon(card);
+    }
+
+    make_label(card, s_subject_names[subject], FONT_CJK, COLOR_TEXT, 0, 78, 110, 22,
+               LV_TEXT_ALIGN_CENTER);
+    char weekly[32];
+    snprintf(weekly, sizeof(weekly), "本周 %" PRIu32 " 分", weekly_minutes);
+    make_label(card, weekly, FONT_CJK, COLOR_TEXT, 0, 112, 110, 23, LV_TEXT_ALIGN_CENTER);
+    return card;
 }
 
 static void add_starfield(lv_obj_t *root)
@@ -263,6 +408,7 @@ static lv_obj_t *prepare_screen(void)
     s_progress_bar = NULL;
     s_password_textarea = NULL;
     s_alarm_switch = NULL;
+    s_volume_label = NULL;
     return root;
 }
 
@@ -276,6 +422,12 @@ static void menu_event(lv_event_t *event)
 {
     (void)event;
     show_menu();
+}
+
+static void settings_event(lv_event_t *event)
+{
+    (void)event;
+    show_settings();
 }
 
 static void start_subject_event(lv_event_t *event)
@@ -360,33 +512,58 @@ static void show_home(void)
     s_screen = SCREEN_HOME;
     lv_obj_t *root = prepare_screen();
 
-    s_clock_label = make_label(root, "--:--", FONT_CLOCK, COLOR_TEXT, 7, 19, 111, 42,
+    make_label(root, "开始写作业", FONT_CJK, COLOR_TEXT, 8, 10, 135, 24,
+               LV_TEXT_ALIGN_CENTER);
+    s_clock_label = make_label(root, "--:--", FONT_CLOCK, COLOR_TEXT, 8, 37, 135, 38,
                                LV_TEXT_ALIGN_CENTER);
     char date_text[32];
     const int32_t civil_day = study_days_from_civil(s_now.year, s_now.month, s_now.day);
     const uint8_t weekday = study_monday_weekday(civil_day);
     snprintf(date_text, sizeof(date_text), "%u月%u日 %s", s_now.month, s_now.day,
              s_weekday_names[weekday]);
-    make_label(root, date_text, FONT_CJK, COLOR_MUTED, 5, 62, 116, 24, LV_TEXT_ALIGN_CENTER);
+    make_label(root, date_text, FONT_CJK, COLOR_MUTED, 8, 77, 135, 22, LV_TEXT_ALIGN_CENTER);
+
+    lv_obj_t *divider = make_shape(root, 23, 106, 105, 2, COLOR_CHINESE, LV_OPA_30, 1);
+    lv_obj_move_background(divider);
 
     const char *status = (week->completion_mask & 0x07) == 0x07
                              ? "全部完成 真棒!"
                              : (weekday == 4 ? "周五 查看周报" : "选择科目开始");
-    make_label(root, status, FONT_CJK, COLOR_BREAK, 4, 111, 118, 25, LV_TEXT_ALIGN_CENTER);
+    make_label(root, status, FONT_CJK, COLOR_BREAK, 8, 119, 135, 24, LV_TEXT_ALIGN_CENTER);
 
-    static const int subject_x[] = {126, 245, 364};
+    static const int subject_x[] = {150, 267, 384};
     for (uint8_t index = 0; index < 3; ++index) {
-        char text[48];
-        snprintf(text, sizeof(text), "%s\n本周 %" PRIu32 " 分", s_subject_names[index],
-                 (week->subject_seconds[index] + 30U) / 60U);
-        make_button(root, text, s_subject_colors[index], s_subject_dark_colors[index],
-                    subject_x[index], 13, 111, 146, start_subject_event,
-                    (void *)(intptr_t)index);
+        make_subject_card(root, index, subject_x[index],
+                          (week->subject_seconds[index] + 30U) / 60U,
+                          start_subject_event);
     }
-    make_button(root, "休息", COLOR_BREAK, COLOR_BREAK_2, 483, 13, 72, 146,
-                start_subject_event, (void *)(intptr_t)STUDY_SUBJECT_BREAK);
-    make_button(root, "更多", COLOR_PANEL, COLOR_PANEL_DARK, 563, 13, 68, 146, menu_event,
-                NULL);
+
+    lv_obj_t *break_card = lv_button_create(root);
+    lv_obj_set_pos(break_card, 501, 10);
+    lv_obj_set_size(break_card, 68, 152);
+    style_surface(break_card, COLOR_BREAK, COLOR_BREAK_2, 14, 2);
+    lv_obj_add_event_cb(break_card, touch_sound_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(break_card, start_subject_event, LV_EVENT_PRESSED,
+                        (void *)(intptr_t)STUDY_SUBJECT_BREAK);
+    add_cup_icon(break_card);
+    make_label(break_card, "休息", FONT_CJK, COLOR_TEXT, 0, 79, 68, 22,
+               LV_TEXT_ALIGN_CENTER);
+    char break_minutes[24];
+    snprintf(break_minutes, sizeof(break_minutes), "%" PRIu32 " 分",
+             (week->break_seconds + 30U) / 60U);
+    make_label(break_card, break_minutes, FONT_CJK, COLOR_TEXT, 0, 113, 68, 22,
+               LV_TEXT_ALIGN_CENTER);
+
+    lv_obj_t *more_card = lv_button_create(root);
+    lv_obj_set_pos(more_card, 576, 10);
+    lv_obj_set_size(more_card, 56, 152);
+    style_surface(more_card, COLOR_CHINESE, COLOR_PANEL_DARK, 14, 1);
+    lv_obj_add_event_cb(more_card, touch_sound_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(more_card, menu_event, LV_EVENT_PRESSED, NULL);
+    make_label(more_card, LV_SYMBOL_SETTINGS, FONT_CLOCK, COLOR_MUTED, 0, 32, 56, 40,
+               LV_TEXT_ALIGN_CENTER);
+    make_label(more_card, "更多", FONT_CJK, COLOR_TEXT, 0, 91, 56, 23,
+               LV_TEXT_ALIGN_CENTER);
     s_last_clock_minute = UINT8_MAX;
 }
 
@@ -416,10 +593,10 @@ static void show_timer(void)
     make_label(subject_panel, weekly, FONT_CJK, COLOR_MUTED, 2, 88, 109, 23,
                LV_TEXT_ALIGN_CENTER);
 
-    s_timer_label = make_label(root, "00:00:00", FONT_TIMER, COLOR_TEXT, 135, 31, 252, 63,
+    s_timer_label = make_label(root, "00:00:00", FONT_TIMER, COLOR_TEXT, 135, 51, 252, 63,
                                LV_TEXT_ALIGN_CENTER);
     s_progress_bar = lv_bar_create(root);
-    lv_obj_set_pos(s_progress_bar, 151, 119);
+    lv_obj_set_pos(s_progress_bar, 151, 132);
     lv_obj_set_size(s_progress_bar, 222, 10);
     lv_obj_set_style_radius(s_progress_bar, 5, LV_PART_MAIN);
     lv_obj_set_style_radius(s_progress_bar, 5, LV_PART_INDICATOR);
@@ -449,7 +626,7 @@ static void show_report(void)
     char total[40];
     format_minutes(study_store_focus_seconds(), total, sizeof(total));
     make_label(root, "专注", FONT_CJK, COLOR_MUTED, 15, 52, 45, 22, LV_TEXT_ALIGN_LEFT);
-    make_label(root, total, FONT_VALUE, COLOR_BREAK, 55, 47, 88, 30, LV_TEXT_ALIGN_CENTER);
+    make_label(root, total, FONT_CJK, COLOR_BREAK, 55, 49, 88, 25, LV_TEXT_ALIGN_CENTER);
     char rest[40];
     format_minutes(week->break_seconds, rest, sizeof(rest));
     make_label(root, "休息", FONT_CJK, COLOR_MUTED, 15, 94, 45, 22, LV_TEXT_ALIGN_LEFT);
@@ -483,16 +660,110 @@ static void show_menu(void)
     make_label(root, "学习与生活小助手", FONT_CJK, COLOR_BREAK, 8, 109, 116, 25,
                LV_TEXT_ALIGN_CENTER);
 
-    make_button(root, "周报", COLOR_CHINESE, COLOR_CHINESE_2, 132, 18, 92, 136,
+    make_button(root, "周报", COLOR_CHINESE, COLOR_CHINESE_2, 128, 18, 78, 136,
                 report_event, NULL);
-    make_button(root, "课程表", COLOR_MATH, COLOR_MATH_2, 233, 18, 102, 136,
+    make_button(root, "课程表", COLOR_MATH, COLOR_MATH_2, 213, 18, 78, 136,
                 schedule_event, NULL);
-    make_button(root, "闹钟", COLOR_ENGLISH, COLOR_ENGLISH_2, 344, 18, 92, 136, alarm_event,
+    make_button(root, "闹钟", COLOR_ENGLISH, COLOR_ENGLISH_2, 298, 18, 78, 136, alarm_event,
                 NULL);
-    make_button(root, "Wi-Fi\n设置", COLOR_WIFI, COLOR_WIFI_2, 445, 18, 92, 136, wifi_event,
+    make_button(root, "Wi-Fi", COLOR_WIFI, COLOR_WIFI_2, 383, 18, 78, 136, wifi_event,
                 NULL);
-    make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 546, 18, 84, 136, home_event,
+    make_button(root, "设置", COLOR_BREAK, COLOR_BREAK_2, 468, 18, 78, 136, settings_event,
                 NULL);
+    make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 553, 18, 78, 136, home_event,
+                NULL);
+}
+
+static void settings_refresh_async(void *user_data)
+{
+    (void)user_data;
+    show_settings();
+}
+
+static void button_sound_switch_event(lv_event_t *event)
+{
+    lv_obj_t *sound_switch = lv_event_get_target_obj(event);
+    const bool enabled = lv_obj_has_state(sound_switch, LV_STATE_CHECKED);
+    const bool was_enabled = app_settings_button_sound_enabled();
+    if (was_enabled) {
+        alarm_audio_click();
+    }
+    const esp_err_t err = app_settings_set_button_sound(enabled);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "save button sound setting failed: %s", esp_err_to_name(err));
+    }
+    if (!was_enabled && enabled) {
+        alarm_audio_click();
+    }
+    lv_async_call(settings_refresh_async, NULL);
+}
+
+static void volume_slider_event(lv_event_t *event)
+{
+    lv_obj_t *slider = lv_event_get_target_obj(event);
+    const uint8_t volume = (uint8_t)lv_slider_get_value(slider);
+    if (lv_event_get_code(event) == LV_EVENT_VALUE_CHANGED) {
+        alarm_audio_set_volume(volume);
+        if (s_volume_label != NULL) {
+            char text[20];
+            snprintf(text, sizeof(text), "音量 %u%%", volume);
+            lv_label_set_text(s_volume_label, text);
+        }
+    } else if (lv_event_get_code(event) == LV_EVENT_RELEASED) {
+        const esp_err_t err = app_settings_set_volume(volume);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "save volume failed: %s", esp_err_to_name(err));
+        }
+        if (app_settings_button_sound_enabled()) {
+            alarm_audio_click();
+        }
+    }
+}
+
+static void show_settings(void)
+{
+    s_screen = SCREEN_SETTINGS;
+    lv_obj_t *root = prepare_screen();
+    make_label(root, "设置", FONT_CJK, COLOR_TEXT, 12, 18, 126, 28, LV_TEXT_ALIGN_CENTER);
+    make_label(root, "个性与声音", FONT_CJK, COLOR_MUTED, 12, 55, 126, 24,
+               LV_TEXT_ALIGN_CENTER);
+    make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 24, 111, 102, 43, menu_event,
+                NULL);
+
+    lv_obj_t *panel = make_panel(root, 157, 16, 455, 140, COLOR_CHINESE, COLOR_PANEL_DARK);
+    make_label(panel, "按键声音", FONT_CJK, COLOR_TEXT, 24, 12, 170, 27, LV_TEXT_ALIGN_LEFT);
+    make_label(panel, app_settings_button_sound_enabled() ? "已开启" : "已关闭", FONT_CJK,
+               app_settings_button_sound_enabled() ? COLOR_BREAK : COLOR_MUTED,
+               24, 40, 170, 23, LV_TEXT_ALIGN_LEFT);
+
+    lv_obj_t *sound_switch = lv_switch_create(panel);
+    lv_obj_set_pos(sound_switch, 342, 13);
+    lv_obj_set_size(sound_switch, 80, 43);
+    lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_BREAK),
+                              LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_TEXT), LV_PART_KNOB);
+    if (app_settings_button_sound_enabled()) {
+        lv_obj_add_state(sound_switch, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(sound_switch, button_sound_switch_event, LV_EVENT_VALUE_CHANGED, NULL);
+
+    make_shape(panel, 20, 70, 405, 1, COLOR_CHINESE, LV_OPA_40, 0);
+    char volume_text[20];
+    snprintf(volume_text, sizeof(volume_text), "音量 %u%%", app_settings_volume());
+    s_volume_label = make_label(panel, volume_text, FONT_CJK, COLOR_TEXT, 24, 88, 100, 25,
+                                LV_TEXT_ALIGN_LEFT);
+    lv_obj_t *volume_slider = lv_slider_create(panel);
+    lv_obj_set_pos(volume_slider, 132, 88);
+    lv_obj_set_size(volume_slider, 290, 20);
+    lv_slider_set_range(volume_slider, 0, 100);
+    lv_slider_set_value(volume_slider, app_settings_volume(), LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(COLOR_BREAK), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(volume_slider, lv_color_hex(COLOR_TEXT), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(volume_slider, 5, LV_PART_KNOB);
+    lv_obj_add_event_cb(volume_slider, volume_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(volume_slider, volume_slider_event, LV_EVENT_RELEASED, NULL);
 }
 
 static uint32_t course_color(const char *course)
@@ -531,10 +802,32 @@ static void schedule_day_event(lv_event_t *event)
     show_schedule();
 }
 
+static void schedule_gesture_event(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_event_get_indev(event);
+    if (indev == NULL) {
+        return;
+    }
+    const lv_dir_t direction = lv_indev_get_gesture_dir(indev);
+    if (direction == LV_DIR_LEFT) {
+        s_schedule_day = (uint8_t)((s_schedule_day + 1U) % 5U);
+    } else if (direction == LV_DIR_RIGHT) {
+        s_schedule_day = s_schedule_day == 0 ? 4 : (uint8_t)(s_schedule_day - 1U);
+    } else {
+        return;
+    }
+    lv_indev_wait_release(indev);
+    if (app_settings_button_sound_enabled()) {
+        alarm_audio_click();
+    }
+    show_schedule();
+}
+
 static void show_schedule(void)
 {
     s_screen = SCREEN_SCHEDULE;
     lv_obj_t *root = prepare_screen();
+    lv_obj_add_event_cb(root, schedule_gesture_event, LV_EVENT_GESTURE, NULL);
     make_label(root, "本周课程表", FONT_CJK, COLOR_TEXT, 9, 9, 115, 25,
                LV_TEXT_ALIGN_CENTER);
     make_label(root, s_weekday_names[s_schedule_day], FONT_CJK, COLOR_MATH, 10, 38, 112, 23,
@@ -623,57 +916,55 @@ static void show_wifi(bool start_scan)
     s_wifi_page_count = wifi_manager_get_networks(s_wifi_page_networks,
                                                    WIFI_MANAGER_MAX_NETWORKS);
 
-    make_label(root, "连接网络", FONT_CJK, COLOR_TEXT, 12, 14, 190, 26,
+    make_label(root, "连接网络", FONT_CJK, COLOR_TEXT, 10, 8, 196, 25,
                LV_TEXT_ALIGN_CENTER);
-    make_label(root, "设置 · Wi-Fi", FONT_CJK, COLOR_MUTED, 12, 42, 190, 22,
+    make_label(root, "设置 · Wi-Fi", FONT_CJK, COLOR_MUTED, 10, 34, 196, 21,
                LV_TEXT_ALIGN_CENTER);
-    lv_obj_t *status_panel = make_panel(root, 14, 70, 188, 84,
+    lv_obj_t *status_panel = make_panel(root, 10, 59, 196, 103,
                                         status.state == WIFI_MANAGER_CONNECTED ? COLOR_BREAK
                                                                                 : COLOR_CHINESE,
                                         status.state == WIFI_MANAGER_CONNECTED ? COLOR_BREAK_2
                                                                                 : COLOR_CHINESE_2);
-    make_label(status_panel, wifi_state_text(status.state), FONT_CJK, COLOR_BREAK, 8, 8, 172, 20,
+    make_label(status_panel, wifi_state_text(status.state), FONT_CJK, COLOR_BREAK, 8, 8, 180, 20,
                LV_TEXT_ALIGN_CENTER);
     make_label(status_panel, status.ssid[0] != '\0' ? status.ssid : "尚未连接", FONT_CJK,
-               COLOR_TEXT, 8, 32, 172, 22, LV_TEXT_ALIGN_CENTER);
+               COLOR_TEXT, 8, 35, 180, 22, LV_TEXT_ALIGN_CENTER);
     char detail[48];
     if (status.state == WIFI_MANAGER_CONNECTED) {
-        snprintf(detail, sizeof(detail), "%s  %d dBm", status.ip, status.rssi);
+        snprintf(detail, sizeof(detail), "%s", status.ip);
     } else {
         snprintf(detail, sizeof(detail), "仅支持 2.4 GHz");
     }
-    make_label(status_panel, detail, LV_FONT_DEFAULT, COLOR_MUTED, 6, 58, 176, 18,
+    make_label(status_panel, detail, FONT_CJK, COLOR_MUTED, 6, 68,
+               status.state == WIFI_MANAGER_CONNECTED ? 108 : 184, 20,
                LV_TEXT_ALIGN_CENTER);
 
-    make_label(root, "选择一个网络", FONT_CJK, COLOR_TEXT, 220, 8, 142, 24,
+    make_label(root, "选择一个网络", FONT_CJK, COLOR_TEXT, 218, 12, 194, 24,
                LV_TEXT_ALIGN_LEFT);
-    make_button(root, "扫描", COLOR_CHINESE, COLOR_CHINESE_2, 475, 6, 74, 30,
+    make_button(root, "扫描", COLOR_CHINESE, COLOR_CHINESE_2, 420, 4, 100, 40,
                 wifi_scan_event, NULL);
-    make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 557, 6, 72, 30, menu_event,
+    make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 528, 4, 102, 40, menu_event,
                 NULL);
 
     if (status.state == WIFI_MANAGER_CONNECTED) {
-        make_button(root, "断开", COLOR_DANGER, COLOR_DANGER_2, 129, 8, 70, 32,
+        make_button(status_panel, "断开", COLOR_DANGER, COLOR_DANGER_2, 117, 65, 68, 28,
                     wifi_disconnect_event, NULL);
     }
     if (s_wifi_page_count == 0) {
         make_label(root, status.state == WIFI_MANAGER_SCANNING ? "正在扫描，请稍候"
                                                                : "没有发现可用网络",
-                   FONT_CJK, COLOR_MUTED, 229, 74, 380, 28, LV_TEXT_ALIGN_CENTER);
+                   FONT_CJK, COLOR_MUTED, 218, 82, 412, 28, LV_TEXT_ALIGN_CENTER);
     }
     const size_t visible = s_wifi_page_count > 3 ? 3 : s_wifi_page_count;
     for (size_t index = 0; index < visible; ++index) {
-        char network_text[64];
-        snprintf(network_text, sizeof(network_text), "%.32s   %s   %d dBm",
-                 s_wifi_page_networks[index].ssid,
-                 s_wifi_page_networks[index].secured ? "密码" : "开放",
-                 s_wifi_page_networks[index].rssi);
         const uint32_t colors[] = {COLOR_CHINESE, COLOR_BREAK, COLOR_ENGLISH};
         const uint32_t darks[] = {COLOR_CHINESE_2, COLOR_BREAK_2, COLOR_ENGLISH_2};
-        make_button(root, network_text, colors[index], darks[index], 220, 42 + (int)index * 40,
-                    409, 34, wifi_network_event, (void *)(intptr_t)index);
+        make_button(root, s_wifi_page_networks[index].ssid, colors[index], darks[index],
+                    218, 49 + (int)index * 40,
+                    412, 36, wifi_network_event, (void *)(intptr_t)index);
     }
-    if (start_scan && status.state != WIFI_MANAGER_SCANNING) {
+    if (start_scan && status.state != WIFI_MANAGER_SCANNING &&
+        status.state != WIFI_MANAGER_CONNECTING) {
         wifi_manager_scan();
     }
 }
@@ -711,43 +1002,55 @@ static void show_wifi_password(void)
 {
     s_screen = SCREEN_WIFI_PASSWORD;
     lv_obj_t *root = prepare_screen();
-    make_label(root, "输入 Wi-Fi 密码", FONT_CJK, COLOR_TEXT, 8, 12, 218, 25,
+    make_label(root, "输入 Wi-Fi 密码", FONT_CJK, COLOR_TEXT, 5, 7, 184, 24,
                LV_TEXT_ALIGN_CENTER);
-    make_label(root, s_selected_ssid, LV_FONT_DEFAULT, COLOR_MUTED, 10, 39, 214, 20,
+    make_label(root, s_selected_ssid, LV_FONT_DEFAULT, COLOR_MUTED, 6, 31, 182, 20,
                LV_TEXT_ALIGN_CENTER);
 
     s_password_textarea = lv_textarea_create(root);
-    lv_obj_set_pos(s_password_textarea, 12, 65);
-    lv_obj_set_size(s_password_textarea, 210, 38);
+    lv_obj_set_pos(s_password_textarea, 8, 55);
+    lv_obj_set_size(s_password_textarea, 178, 43);
     lv_textarea_set_one_line(s_password_textarea, true);
     lv_textarea_set_password_mode(s_password_textarea, true);
     lv_textarea_set_max_length(s_password_textarea, 63);
+    lv_textarea_set_placeholder_text(s_password_textarea, "请输入密码");
     lv_obj_set_style_bg_color(s_password_textarea, lv_color_hex(COLOR_PANEL), 0);
     lv_obj_set_style_border_color(s_password_textarea, lv_color_hex(COLOR_CHINESE), 0);
     lv_obj_set_style_border_width(s_password_textarea, 2, 0);
     lv_obj_set_style_text_color(s_password_textarea, lv_color_hex(COLOR_TEXT), 0);
-    lv_obj_set_style_text_font(s_password_textarea, LV_FONT_DEFAULT, 0);
+    lv_obj_set_style_text_font(s_password_textarea, FONT_CJK, 0);
 
-    make_button(root, "取消", COLOR_PANEL, COLOR_PANEL_DARK, 12, 115, 90, 42,
+    make_button(root, "取消", COLOR_PANEL, COLOR_PANEL_DARK, 8, 109, 84, 51,
                 wifi_event, NULL);
-    make_button(root, "连接", COLOR_CHINESE, COLOR_CHINESE_2, 112, 115, 110, 42,
+    make_button(root, "连接", COLOR_CHINESE, COLOR_CHINESE_2, 99, 109, 87, 51,
                 wifi_connect_button_event, NULL);
 
     lv_obj_t *keyboard = lv_keyboard_create(root);
-    lv_obj_set_pos(keyboard, 236, 5);
-    lv_obj_set_size(keyboard, 399, 162);
+    lv_obj_set_pos(keyboard, 194, 2);
+    lv_obj_set_size(keyboard, 438, 168);
+    lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER, s_keyboard_lower_map,
+                        s_keyboard_ctrl_map);
+    lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_TEXT_UPPER, s_keyboard_upper_map,
+                        s_keyboard_ctrl_map);
     lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(keyboard, s_password_textarea);
     lv_obj_set_style_bg_color(keyboard, lv_color_hex(COLOR_PANEL_DARK), 0);
     lv_obj_set_style_border_width(keyboard, 0, 0);
-    lv_obj_set_style_pad_all(keyboard, 3, 0);
-    lv_obj_set_style_pad_row(keyboard, 3, 0);
-    lv_obj_set_style_pad_column(keyboard, 3, 0);
+    lv_obj_set_style_pad_all(keyboard, 2, 0);
+    lv_obj_set_style_pad_row(keyboard, 2, 0);
+    lv_obj_set_style_pad_column(keyboard, 2, 0);
     lv_obj_set_style_bg_color(keyboard, lv_color_hex(COLOR_CHINESE_2), LV_PART_ITEMS);
     lv_obj_set_style_text_color(keyboard, lv_color_hex(COLOR_TEXT), LV_PART_ITEMS);
     lv_obj_set_style_radius(keyboard, 7, LV_PART_ITEMS);
     lv_obj_set_style_border_color(keyboard, lv_color_hex(COLOR_CHINESE), LV_PART_ITEMS);
     lv_obj_set_style_border_width(keyboard, 1, LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(COLOR_CHINESE),
+                              LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(keyboard, lv_color_hex(COLOR_TEXT),
+                                LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(COLOR_CHINESE),
+                              LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_add_event_cb(keyboard, touch_sound_event, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(keyboard, wifi_keyboard_event, LV_EVENT_ALL, NULL);
 }
 
@@ -845,6 +1148,7 @@ static void show_alarm(void)
     }
     lv_obj_set_style_bg_color(s_alarm_switch, lv_color_hex(COLOR_BREAK),
                               LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(s_alarm_switch, touch_sound_event, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(s_alarm_switch, alarm_switch_event, LV_EVENT_VALUE_CHANGED, NULL);
 
     make_label(settings, "重复", FONT_CJK, COLOR_MUTED, 12, 61, 60, 23, LV_TEXT_ALIGN_LEFT);

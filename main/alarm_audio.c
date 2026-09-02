@@ -11,6 +11,7 @@
 #include "esp_codec_dev_defaults.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #define ALARM_SAMPLE_RATE 16000
@@ -22,7 +23,9 @@ static const audio_codec_ctrl_if_t *s_ctrl_if;
 static const audio_codec_gpio_if_t *s_gpio_if;
 static const audio_codec_if_t *s_codec_if;
 static esp_codec_dev_handle_t s_playback;
+static SemaphoreHandle_t s_audio_mutex;
 static volatile bool s_playing;
+static volatile bool s_click_playing;
 static bool s_available;
 
 static void alarm_tone_task(void *argument)
@@ -31,6 +34,7 @@ static void alarm_tone_task(void *argument)
     int16_t samples[256 * 2];
     uint32_t phase = 0;
     uint32_t block = 0;
+    xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
     while (s_playing) {
         const bool silent = (block % 8U) >= 6U;
         const uint32_t frequency = (block % 16U) < 8U ? 880U : 660U;
@@ -52,7 +56,31 @@ static void alarm_tone_task(void *argument)
     }
     memset(samples, 0, sizeof(samples));
     esp_codec_dev_write(s_playback, samples, sizeof(samples));
+    xSemaphoreGive(s_audio_mutex);
     s_playing = false;
+    vTaskDelete(NULL);
+}
+
+static void click_tone_task(void *argument)
+{
+    (void)argument;
+    enum { CLICK_SAMPLES = 320 };
+    int16_t samples[CLICK_SAMPLES * 2];
+    const uint32_t half_period = ALARM_SAMPLE_RATE / (1500U * 2U);
+    for (size_t index = 0; index < CLICK_SAMPLES; ++index) {
+        const int32_t envelope = 12000 * (CLICK_SAMPLES - (int32_t)index) / CLICK_SAMPLES;
+        const int16_t value = ((index / half_period) & 1U) != 0 ? (int16_t)envelope
+                                                                : (int16_t)-envelope;
+        samples[index * 2] = value;
+        samples[index * 2 + 1] = value;
+    }
+
+    xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
+    if (!s_playing) {
+        esp_codec_dev_write(s_playback, samples, sizeof(samples));
+    }
+    xSemaphoreGive(s_audio_mutex);
+    s_click_playing = false;
     vTaskDelete(NULL);
 }
 
@@ -114,7 +142,6 @@ esp_err_t alarm_audio_init(void)
         s_playback == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    esp_codec_dev_set_out_vol(s_playback, 68.0f);
     esp_codec_dev_sample_info_t sample_info = {
         .sample_rate = ALARM_SAMPLE_RATE,
         .channel = 2,
@@ -123,8 +150,38 @@ esp_err_t alarm_audio_init(void)
     if (esp_codec_dev_open(s_playback, &sample_info) != ESP_CODEC_DEV_OK) {
         return ESP_FAIL;
     }
+    s_audio_mutex = xSemaphoreCreateMutex();
+    if (s_audio_mutex == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
     s_available = true;
     ESP_LOGI(TAG, "ES8311 alarm audio ready");
+    return ESP_OK;
+}
+
+esp_err_t alarm_audio_set_volume(uint8_t volume)
+{
+    if (!s_available || volume > 100) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return esp_codec_dev_set_out_vol(s_playback, (float)volume) == ESP_CODEC_DEV_OK
+               ? ESP_OK
+               : ESP_FAIL;
+}
+
+esp_err_t alarm_audio_click(void)
+{
+    if (!s_available || s_playing) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_click_playing) {
+        return ESP_OK;
+    }
+    s_click_playing = true;
+    if (xTaskCreate(click_tone_task, "button_click", 3072, NULL, 3, NULL) != pdPASS) {
+        s_click_playing = false;
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 

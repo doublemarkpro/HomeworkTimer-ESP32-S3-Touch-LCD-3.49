@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.c"
         "alarm_audio.c"
         "alarm_store.c"
+        "app_settings.c"
         "board_display.c"
         "rtc_pcf85063.c"
         "study_store.c"
