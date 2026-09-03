@@ -38,8 +38,13 @@ static uint8_t s_last_backlight_percent = 100;
 static bool s_display_sleeping;
 static bool s_touch_release_gate;
 static int64_t s_touch_release_since_us;
+static bool s_touch_pressed;
+static int64_t s_touch_missing_since_us;
+static lv_point_t s_last_touch_point;
 
 #define TOUCH_RELEASE_STABLE_US 250000
+#define TOUCH_GESTURE_RELEASE_STABLE_US 40000
+#define TOUCH_I2C_TIMEOUT_MS 15
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_commands[] = {
     {0x11, (uint8_t[]){0x00}, 0, 100},
@@ -103,7 +108,8 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
     };
     uint8_t response[32] = {0};
     const esp_err_t err = i2c_master_transmit_receive(
-        s_touch_device, command, sizeof(command), response, sizeof(response), 100);
+        s_touch_device, command, sizeof(command), response, sizeof(response),
+        TOUCH_I2C_TIMEOUT_MS);
     const int64_t now_us = esp_timer_get_time();
     const bool valid_sample = err == ESP_OK;
     const bool raw_pressed = valid_sample && response[1] > 0 && response[1] < 5;
@@ -121,21 +127,41 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
             s_touch_release_since_us = 0;
             ESP_LOGI(TAG, "touch release gate cleared");
         }
+        s_touch_pressed = false;
+        s_touch_missing_since_us = 0;
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
 
-    if (err != ESP_OK || response[1] == 0 || response[1] >= 5) {
+    if (!raw_pressed) {
         if (err != ESP_OK && now_us - s_last_touch_error_log_us > 1000000) {
             ESP_LOGW(TAG, "touch I2C read failed: %s", esp_err_to_name(err));
             s_last_touch_error_log_us = now_us;
         }
-        /* Match the Waveshare reference driver: never invent pressed samples
-         * after the controller has reported that the finger is up. Synthetic
-         * samples made one physical swipe look like multiple gestures. */
+
+        /* The AXS15231B touch data can briefly contain zero points while a
+         * finger is still moving. Keep the last real point for a very short
+         * interval so LVGL sees one continuous gesture instead of a release,
+         * snap-back, and a second press. A genuine release is delayed by only
+         * four 10 ms input samples. */
+        if (s_touch_pressed) {
+            if (s_touch_missing_since_us == 0) {
+                s_touch_missing_since_us = now_us;
+            }
+            if (now_us - s_touch_missing_since_us < TOUCH_GESTURE_RELEASE_STABLE_US) {
+                data->state = LV_INDEV_STATE_PRESSED;
+                data->point = s_last_touch_point;
+                return;
+            }
+        }
+
+        s_touch_pressed = false;
+        s_touch_missing_since_us = 0;
         data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
+
+    s_touch_missing_since_us = 0;
 
     uint16_t point_x = ((uint16_t)(response[2] & 0x0F) << 8) | response[3];
     uint16_t point_y = ((uint16_t)(response[4] & 0x0F) << 8) | response[5];
@@ -151,12 +177,16 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = point_y;
     data->point.y = BOARD_LCD_HEIGHT - 1 - point_x;
+    s_last_touch_point = data->point;
+    s_touch_pressed = true;
 }
 
 void board_display_block_touch_until_release(void)
 {
     s_touch_release_since_us = 0;
     s_touch_release_gate = true;
+    s_touch_pressed = false;
+    s_touch_missing_since_us = 0;
     if (s_touch_input != NULL) {
         lv_indev_wait_release(s_touch_input);
     }
@@ -386,6 +416,11 @@ static esp_err_t init_panel(lv_display_t **lvgl_display)
      * transform by 180 degrees compared with the previous 90 degree setup.
      */
     lv_display_set_rotation(display, LV_DISPLAY_ROTATION_270);
+    /* LVGL defaults to a 33 ms refresh period (about 30 FPS). Scrolling a
+     * full-height carousel benefits from requesting the next frame at 16 ms;
+     * the display driver will naturally run slower if a transfer takes more
+     * time, without queuing stale frames. */
+    lv_timer_set_period(lv_display_get_refr_timer(display), BOARD_LVGL_REFRESH_MS);
     s_panel = panel;
     *lvgl_display = display;
     return ESP_OK;
@@ -410,6 +445,10 @@ esp_err_t board_display_init(void)
     lv_indev_set_display(input, display);
     lv_indev_set_read_cb(input, touch_read);
     lv_timer_set_period(lv_indev_get_read_timer(input), 10);
+    /* Start scrolling after a small deliberate move and make the release
+     * inertia settle quickly on this short, wide screen. */
+    lv_indev_set_scroll_limit(input, 6);
+    lv_indev_set_scroll_throw(input, 20);
     s_touch_input = input;
 
     const esp_timer_create_args_t tick_args = {
@@ -424,7 +463,8 @@ esp_err_t board_display_init(void)
     s_lvgl_mutex = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_lvgl_mutex != NULL, ESP_ERR_NO_MEM, TAG, "LVGL mutex");
     const BaseType_t created = xTaskCreatePinnedToCore(
-        lvgl_task, "lvgl", BOARD_LVGL_TASK_STACK, NULL, BOARD_LVGL_TASK_PRIORITY, NULL, 0);
+        lvgl_task, "lvgl", BOARD_LVGL_TASK_STACK, NULL, BOARD_LVGL_TASK_PRIORITY, NULL,
+        BOARD_LVGL_TASK_CORE);
     ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "LVGL task");
 
     ESP_LOGI(TAG, "640x172 landscape display ready (180 degree orientation)");

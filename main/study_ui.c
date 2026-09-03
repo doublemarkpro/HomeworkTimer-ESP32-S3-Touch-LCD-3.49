@@ -172,6 +172,7 @@ static lv_obj_t *s_pause_icon;
 static lv_obj_t *s_progress_bar;
 static lv_obj_t *s_password_textarea;
 static lv_obj_t *s_alarm_switch;
+static lv_obj_t *s_alarm_status_label;
 static lv_obj_t *s_volume_label;
 static lv_obj_t *s_brightness_label;
 static lv_obj_t *s_sound_status_label;
@@ -485,6 +486,7 @@ static lv_obj_t *prepare_screen(void)
     s_progress_bar = NULL;
     s_password_textarea = NULL;
     s_alarm_switch = NULL;
+    s_alarm_status_label = NULL;
     s_volume_label = NULL;
     s_brightness_label = NULL;
     s_sound_status_label = NULL;
@@ -891,10 +893,15 @@ static void show_home(void)
     lv_obj_set_style_border_width(carousel, 0, 0);
     lv_obj_set_style_pad_all(carousel, 0, 0);
     lv_obj_set_scroll_dir(carousel, LV_DIR_HOR);
-    lv_obj_set_scroll_snap_x(carousel, LV_SCROLL_SNAP_START);
+    /* The viewport already exposes more than four cards. Snapping every
+     * 118 px made short swipes animate back in the opposite direction and
+     * SCROLL_ONE added artificial resistance. Keep a short natural coast,
+     * but let the content track the finger and stop firmly at both ends. */
+    lv_obj_set_scroll_snap_x(carousel, LV_SCROLL_SNAP_NONE);
     lv_obj_set_scroll_snap_y(carousel, LV_SCROLL_SNAP_NONE);
     lv_obj_set_scrollbar_mode(carousel, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(carousel, LV_OBJ_FLAG_SCROLL_ONE | LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_remove_flag(carousel, LV_OBJ_FLAG_SCROLL_ONE | LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_add_flag(carousel, LV_OBJ_FLAG_SCROLL_MOMENTUM);
 
     static const int subject_x[] = {0, 118, 236};
     for (uint8_t index = 0; index < 3; ++index) {
@@ -1924,10 +1931,30 @@ static void alarm_adjust_event(lv_event_t *event)
 
 static void alarm_switch_event(lv_event_t *event)
 {
-    (void)event;
+    lv_obj_t *alarm_switch = lv_event_get_target_obj(event);
     alarm_config_t config = *alarm_store_get();
-    config.enabled = lv_obj_has_state(s_alarm_switch, LV_STATE_CHECKED);
-    save_alarm_and_refresh(&config);
+    const bool enabled = !config.enabled;
+
+    /* Use the same first-press + stable-release gate as the sound switch.
+     * Rebuilding this page from VALUE_CHANGED left a fresh switch under a
+     * noisy second touch report, which immediately saved the opposite state. */
+    board_display_block_touch_until_release();
+    config.enabled = enabled;
+    const esp_err_t err = alarm_store_save(&config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "save alarm enabled state failed: %s", esp_err_to_name(err));
+        return;
+    }
+    if (enabled) {
+        lv_obj_add_state(alarm_switch, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(alarm_switch, LV_STATE_CHECKED);
+    }
+    if (s_alarm_status_label != NULL) {
+        lv_label_set_text(s_alarm_status_label, enabled ? "闹钟已开启" : "闹钟已关闭");
+        lv_obj_set_style_text_color(s_alarm_status_label,
+                                    lv_color_hex(enabled ? COLOR_BREAK : COLOR_MUTED), 0);
+    }
 }
 
 static void alarm_repeat_event(lv_event_t *event)
@@ -1946,9 +1973,11 @@ static void show_alarm(void)
 
     make_label(root, "学习闹钟", FONT_CJK_BOLD, COLOR_TEXT, 12, 14, 113, 29,
                LV_TEXT_ALIGN_CENTER);
-    make_label(root, config->enabled ? "闹钟已开启" : "闹钟已关闭", FONT_CJK,
-               config->enabled ? COLOR_BREAK : COLOR_MUTED, 8, 51, 121, 23,
-               LV_TEXT_ALIGN_CENTER);
+    s_alarm_status_label = make_label(root,
+                                      config->enabled ? "闹钟已开启" : "闹钟已关闭",
+                                      FONT_CJK,
+                                      config->enabled ? COLOR_BREAK : COLOR_MUTED,
+                                      8, 51, 121, 23, LV_TEXT_ALIGN_CENTER);
     make_label(root, alarm_audio_available() ? "板载扬声器响铃" : "屏幕提醒模式", FONT_CJK,
                COLOR_MUTED, 8, 83, 121, 22, LV_TEXT_ALIGN_CENTER);
     make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 17, 119, 103, 39, menu_event,
@@ -1982,7 +2011,7 @@ static void show_alarm(void)
     lv_obj_set_style_bg_color(s_alarm_switch, lv_color_hex(COLOR_BREAK),
                               LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(s_alarm_switch, touch_sound_event, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(s_alarm_switch, alarm_switch_event, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_alarm_switch, alarm_switch_event, LV_EVENT_PRESSED, NULL);
 
     make_label(settings, "重复", FONT_CJK, COLOR_MUTED, 12, 61, 60, 23, LV_TEXT_ALIGN_LEFT);
     make_button(settings, config->days_mask == 0x7F ? "每天" : "工作日", COLOR_CHINESE,

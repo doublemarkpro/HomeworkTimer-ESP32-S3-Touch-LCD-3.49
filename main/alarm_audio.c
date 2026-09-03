@@ -16,6 +16,9 @@
 #include "freertos/task.h"
 
 #define ALARM_SAMPLE_RATE 24000
+#define ALARM_TONE_AMPLITUDE 7000
+#define ALARM_ATTACK_MS 70
+#define ALARM_RELEASE_MS 110
 #define CLICK_AMP_SETTLE_MS 40
 #define CLICK_DRAIN_MS 120
 
@@ -33,6 +36,32 @@ static SemaphoreHandle_t s_audio_mutex;
 static volatile bool s_playing;
 static volatile bool s_click_playing;
 static bool s_available;
+
+static const int16_t s_sine_wave[64] = {
+    0,      3212,   6393,   9512,   12539,  15446,  18204,  20787,
+    23170,  25330,  27245,  28898,  30273,  31356,  32138,  32610,
+    32767,  32610,  32138,  31356,  30273,  28898,  27245,  25330,
+    23170,  20787,  18204,  15446,  12539,  9512,   6393,   3212,
+    0,      -3212,  -6393,  -9512,  -12539, -15446, -18204, -20787,
+    -23170, -25330, -27245, -28898, -30273, -31356, -32138, -32610,
+    -32767, -32610, -32138, -31356, -30273, -28898, -27245, -25330,
+    -23170, -20787, -18204, -15446, -12539, -9512,  -6393,  -3212,
+};
+
+typedef struct {
+    uint16_t frequency;
+    uint16_t duration_ms;
+    uint16_t gap_ms;
+} alarm_note_t;
+
+/* A gentle rising-and-falling chime. The previous 880/660 Hz square wave
+ * changed pitch every 85 ms, which made it sound like an emergency siren. */
+static const alarm_note_t s_alarm_melody[] = {
+    {523, 300, 90},
+    {659, 300, 90},
+    {784, 430, 130},
+    {659, 340, 720},
+};
 
 static void write_silence(void)
 {
@@ -59,32 +88,81 @@ static void amplifier_off(void)
     (void)board_power_set_speaker(false);
 }
 
+static bool write_alarm_silence(uint32_t duration_ms)
+{
+    int16_t samples[256 * 2] = {0};
+    uint32_t remaining = (ALARM_SAMPLE_RATE * duration_ms) / 1000U;
+    while (remaining > 0 && s_playing) {
+        const uint32_t frames = remaining < 256U ? remaining : 256U;
+        if (esp_codec_dev_write(s_playback, samples, frames * 2U * sizeof(int16_t)) !=
+            ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "alarm silence write failed");
+            return false;
+        }
+        remaining -= frames;
+    }
+    return s_playing;
+}
+
+static bool write_alarm_note(uint16_t frequency, uint16_t duration_ms)
+{
+    int16_t samples[256 * 2];
+    const uint32_t total_frames = (ALARM_SAMPLE_RATE * duration_ms) / 1000U;
+    const uint32_t attack_frames = (ALARM_SAMPLE_RATE * ALARM_ATTACK_MS) / 1000U;
+    const uint32_t release_frames = (ALARM_SAMPLE_RATE * ALARM_RELEASE_MS) / 1000U;
+    const uint32_t phase_step = (uint32_t)(((uint64_t)frequency << 32) / ALARM_SAMPLE_RATE);
+    uint32_t phase = 0;
+    uint32_t produced = 0;
+
+    while (produced < total_frames && s_playing) {
+        const uint32_t frames = total_frames - produced < 256U
+                                    ? total_frames - produced
+                                    : 256U;
+        for (uint32_t index = 0; index < frames; ++index) {
+            const uint32_t position = produced + index;
+            uint32_t amplitude = ALARM_TONE_AMPLITUDE;
+            if (position < attack_frames) {
+                amplitude = (amplitude * position) / attack_frames;
+            }
+            const uint32_t remaining = total_frames - position;
+            if (remaining < release_frames) {
+                const uint32_t release_amplitude =
+                    (ALARM_TONE_AMPLITUDE * remaining) / release_frames;
+                if (release_amplitude < amplitude) amplitude = release_amplitude;
+            }
+
+            const int32_t value =
+                ((int32_t)s_sine_wave[phase >> 26] * (int32_t)amplitude) / 32767;
+            samples[index * 2U] = (int16_t)value;
+            samples[index * 2U + 1U] = (int16_t)value;
+            phase += phase_step;
+        }
+        if (esp_codec_dev_write(s_playback, samples, frames * 2U * sizeof(int16_t)) !=
+            ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "alarm note write failed");
+            return false;
+        }
+        produced += frames;
+    }
+    return s_playing;
+}
+
 static void alarm_tone_task(void *argument)
 {
     (void)argument;
-    int16_t samples[256 * 2];
-    uint32_t phase = 0;
-    uint32_t block = 0;
     xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
-    const bool output_ready = amplifier_on();
+    bool output_ready = amplifier_on();
     while (s_playing && output_ready) {
-        const bool silent = (block % 8U) >= 6U;
-        const uint32_t frequency = (block % 16U) < 8U ? 880U : 660U;
-        const uint32_t half_period = ALARM_SAMPLE_RATE / (frequency * 2U);
-        for (size_t index = 0; index < 256; ++index) {
-            int16_t value = 0;
-            if (!silent) {
-                value = ((phase / half_period) & 1U) != 0 ? 14000 : -14000;
-                phase++;
+        for (size_t index = 0;
+             index < sizeof(s_alarm_melody) / sizeof(s_alarm_melody[0]) && s_playing;
+             ++index) {
+            if (!write_alarm_note(s_alarm_melody[index].frequency,
+                                  s_alarm_melody[index].duration_ms) ||
+                !write_alarm_silence(s_alarm_melody[index].gap_ms)) {
+                output_ready = false;
+                break;
             }
-            samples[index * 2] = value;
-            samples[index * 2 + 1] = value;
         }
-        if (esp_codec_dev_write(s_playback, samples, sizeof(samples)) != ESP_CODEC_DEV_OK) {
-            ESP_LOGW(TAG, "audio write failed");
-            break;
-        }
-        block++;
     }
     amplifier_off();
     xSemaphoreGive(s_audio_mutex);
