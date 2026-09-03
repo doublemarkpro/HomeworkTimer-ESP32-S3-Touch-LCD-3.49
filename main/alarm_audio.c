@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "board_config.h"
+#include "board_power.h"
 #include "driver/i2c_master.h"
 #include "driver/i2s_tdm.h"
 #include "esp_check.h"
@@ -14,7 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#define ALARM_SAMPLE_RATE 16000
+#define ALARM_SAMPLE_RATE 24000
 
 static const char *TAG = "alarm_audio";
 static i2s_chan_handle_t s_tx;
@@ -42,7 +43,7 @@ static void alarm_tone_task(void *argument)
         for (size_t index = 0; index < 256; ++index) {
             int16_t value = 0;
             if (!silent) {
-                value = ((phase / half_period) & 1U) != 0 ? 7200 : -7200;
+                value = ((phase / half_period) & 1U) != 0 ? 14000 : -14000;
                 phase++;
             }
             samples[index * 2] = value;
@@ -64,20 +65,32 @@ static void alarm_tone_task(void *argument)
 static void click_tone_task(void *argument)
 {
     (void)argument;
-    enum { CLICK_SAMPLES = 320 };
-    int16_t samples[CLICK_SAMPLES * 2];
+    enum { CLICK_SAMPLES = 1200, BLOCK_SAMPLES = 240 };
+    int16_t samples[BLOCK_SAMPLES * 2];
     const uint32_t half_period = ALARM_SAMPLE_RATE / (1500U * 2U);
-    for (size_t index = 0; index < CLICK_SAMPLES; ++index) {
-        const int32_t envelope = 12000 * (CLICK_SAMPLES - (int32_t)index) / CLICK_SAMPLES;
-        const int16_t value = ((index / half_period) & 1U) != 0 ? (int16_t)envelope
-                                                                : (int16_t)-envelope;
-        samples[index * 2] = value;
-        samples[index * 2 + 1] = value;
-    }
 
     xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
     if (!s_playing) {
-        esp_codec_dev_write(s_playback, samples, sizeof(samples));
+        for (size_t offset = 0; offset < CLICK_SAMPLES; offset += BLOCK_SAMPLES) {
+            const size_t count = CLICK_SAMPLES - offset < BLOCK_SAMPLES
+                                     ? CLICK_SAMPLES - offset
+                                     : BLOCK_SAMPLES;
+            for (size_t sample = 0; sample < count; ++sample) {
+                const size_t index = offset + sample;
+                const int32_t envelope =
+                    18000 * (CLICK_SAMPLES - (int32_t)index) / CLICK_SAMPLES;
+                const int16_t value = ((index / half_period) & 1U) != 0
+                                          ? (int16_t)envelope
+                                          : (int16_t)-envelope;
+                samples[sample * 2] = value;
+                samples[sample * 2 + 1] = value;
+            }
+            if (esp_codec_dev_write(s_playback, samples,
+                                    (int)(count * 2 * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
+                ESP_LOGW(TAG, "button click audio write failed");
+                break;
+            }
+        }
     }
     xSemaphoreGive(s_audio_mutex);
     s_click_playing = false;
@@ -89,6 +102,7 @@ esp_err_t alarm_audio_init(void)
     i2c_master_bus_handle_t i2c_bus = NULL;
     ESP_RETURN_ON_ERROR(i2c_master_get_bus_handle(BOARD_RTC_I2C_PORT, &i2c_bus), TAG,
                         "get codec I2C bus");
+    ESP_RETURN_ON_ERROR(board_power_set_speaker(true), TAG, "speaker amplifier");
 
     i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     channel_config.auto_clear = true;
@@ -150,6 +164,9 @@ esp_err_t alarm_audio_init(void)
     if (esp_codec_dev_open(s_playback, &sample_info) != ESP_CODEC_DEV_OK) {
         return ESP_FAIL;
     }
+    if (esp_codec_dev_set_out_mute(s_playback, false) != ESP_CODEC_DEV_OK) {
+        return ESP_FAIL;
+    }
     s_audio_mutex = xSemaphoreCreateMutex();
     if (s_audio_mutex == NULL) {
         return ESP_ERR_NO_MEM;
@@ -178,7 +195,10 @@ esp_err_t alarm_audio_click(void)
         return ESP_OK;
     }
     s_click_playing = true;
-    if (xTaskCreate(click_tone_task, "button_click", 3072, NULL, 3, NULL) != pdPASS) {
+    /* Keep UI navigation responsive: the short I2S write must not preempt the
+     * LVGL task while it is constructing and drawing the next page. */
+    if (xTaskCreatePinnedToCore(click_tone_task, "button_click", 4096, NULL, 1, NULL, 1) !=
+        pdPASS) {
         s_click_playing = false;
         return ESP_ERR_NO_MEM;
     }
@@ -194,7 +214,8 @@ esp_err_t alarm_audio_start(void)
         return ESP_OK;
     }
     s_playing = true;
-    if (xTaskCreate(alarm_tone_task, "alarm_tone", 3072, NULL, 4, NULL) != pdPASS) {
+    if (xTaskCreatePinnedToCore(alarm_tone_task, "alarm_tone", 4096, NULL, 4, NULL, 1) !=
+        pdPASS) {
         s_playing = false;
         return ESP_ERR_NO_MEM;
     }

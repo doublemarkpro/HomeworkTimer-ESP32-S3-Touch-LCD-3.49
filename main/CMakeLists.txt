@@ -4,10 +4,13 @@ idf_component_register(
         "alarm_audio.c"
         "alarm_store.c"
         "app_settings.c"
+        "battery_monitor.c"
         "board_display.c"
+        "board_power.c"
         "rtc_pcf85063.c"
         "study_store.c"
         "study_ui.c"
+        "time_sync.c"
         "ui_font_16.c"
         "wifi_manager.c"
     INCLUDE_DIRS "."
@@ -17,6 +20,7 @@ idf_component_register(
         esp_driver_i2s
         esp_driver_ledc
         esp_driver_spi
+        esp_adc
         esp_lcd
         esp_timer
         esp_event

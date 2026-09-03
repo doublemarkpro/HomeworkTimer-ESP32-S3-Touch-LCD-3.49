@@ -15,8 +15,11 @@
 #define BOARD_LCD_PIN_DATA1         GPIO_NUM_12
 #define BOARD_LCD_PIN_DATA2         GPIO_NUM_13
 #define BOARD_LCD_PIN_DATA3         GPIO_NUM_14
-#define BOARD_LCD_PIN_RESET         GPIO_NUM_21
-#define BOARD_LCD_PIN_BACKLIGHT     GPIO_NUM_8
+/* Rev1.1 / V2 hardware (shipping since 2026-06-08).  V2 moved the
+ * backlight PWM from GPIO8 to GPIO42 and moved LCD reset to TCA9554 IO5.
+ * GPIO21 is LCD_TE and GPIO8 is the expander interrupt on this revision. */
+#define BOARD_LCD_PIN_TE            GPIO_NUM_21
+#define BOARD_LCD_PIN_BACKLIGHT     GPIO_NUM_42
 
 #define BOARD_TOUCH_I2C_PORT        I2C_NUM_1
 #define BOARD_TOUCH_PIN_SCL         GPIO_NUM_18
@@ -33,6 +36,13 @@
 #define BOARD_AUDIO_PIN_WS          GPIO_NUM_46
 #define BOARD_AUDIO_PIN_DIN         GPIO_NUM_6
 #define BOARD_AUDIO_PIN_DOUT        GPIO_NUM_45
+#define BOARD_IO_EXPANDER_ADDR      0x20
+#define BOARD_DISPLAY_ENABLE_MASK   (1U << 1)
+#define BOARD_DISPLAY_RESET_MASK    (1U << 5)
+#define BOARD_POWER_HOLD_PIN_MASK   (1U << 6)
+#define BOARD_AUDIO_AMP_PIN_MASK    (1U << 7)
+#define BOARD_POWER_BUTTON_PIN      GPIO_NUM_16
+#define BOARD_POWER_LONG_PRESS_MS   1200
 
 #define BOARD_LVGL_TICK_MS          5
 #define BOARD_LVGL_TASK_MIN_MS      5

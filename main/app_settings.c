@@ -6,11 +6,13 @@
 #define SETTINGS_NS        "app_settings"
 #define BUTTON_SOUND_KEY   "button_sound"
 #define VOLUME_KEY         "volume"
+#define BRIGHTNESS_KEY     "brightness"
 
 static const char *TAG = "app_settings";
 static nvs_handle_t s_nvs;
 static bool s_button_sound = true;
 static uint8_t s_volume = 100;
+static uint8_t s_brightness = 100;
 
 esp_err_t app_settings_init(void)
 {
@@ -38,6 +40,17 @@ esp_err_t app_settings_init(void)
         ESP_RETURN_ON_ERROR(volume_result, TAG, "read volume");
     }
     s_volume = stored <= 100 ? stored : 100;
+
+    stored = 100;
+    const esp_err_t brightness_result = nvs_get_u8(s_nvs, BRIGHTNESS_KEY, &stored);
+    if (brightness_result == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_RETURN_ON_ERROR(nvs_set_u8(s_nvs, BRIGHTNESS_KEY, 100), TAG,
+                            "write default brightness");
+        ESP_RETURN_ON_ERROR(nvs_commit(s_nvs), TAG, "commit default brightness");
+    } else {
+        ESP_RETURN_ON_ERROR(brightness_result, TAG, "read brightness");
+    }
+    s_brightness = stored >= 10 && stored <= 100 ? stored : 100;
     return ESP_OK;
 }
 
@@ -64,5 +77,20 @@ esp_err_t app_settings_set_volume(uint8_t volume)
     ESP_RETURN_ON_FALSE(volume <= 100, ESP_ERR_INVALID_ARG, TAG, "invalid volume");
     s_volume = volume;
     ESP_RETURN_ON_ERROR(nvs_set_u8(s_nvs, VOLUME_KEY, volume), TAG, "write volume");
+    return nvs_commit(s_nvs);
+}
+
+uint8_t app_settings_brightness(void)
+{
+    return s_brightness;
+}
+
+esp_err_t app_settings_set_brightness(uint8_t brightness)
+{
+    ESP_RETURN_ON_FALSE(brightness >= 10 && brightness <= 100, ESP_ERR_INVALID_ARG, TAG,
+                        "invalid brightness");
+    s_brightness = brightness;
+    ESP_RETURN_ON_ERROR(nvs_set_u8(s_nvs, BRIGHTNESS_KEY, brightness), TAG,
+                        "write brightness");
     return nvs_commit(s_nvs);
 }

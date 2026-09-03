@@ -1,10 +1,12 @@
 #include "board_display.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "board_config.h"
+#include "board_power.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
@@ -29,9 +31,6 @@ static i2c_master_bus_handle_t s_touch_bus;
 static i2c_master_dev_handle_t s_touch_device;
 static uint16_t *s_dma_buffer;
 static uint8_t *s_rotated_buffer;
-static lv_point_t s_last_touch_point;
-static uint8_t s_touch_miss_count;
-static bool s_touch_active;
 static int64_t s_last_touch_error_log_us;
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_commands[] = {
@@ -102,20 +101,10 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
             ESP_LOGW(TAG, "touch I2C read failed: %s", esp_err_to_name(err));
             s_last_touch_error_log_us = esp_timer_get_time();
         }
-        /*
-         * The controller can occasionally return one empty sample while a
-         * finger is still down. Keep the last point for up to eight 10 ms
-         * polls so LVGL does not lose taps or swipe gestures on a dropout.
-         */
-        if (s_touch_active && s_touch_miss_count < 8) {
-            ++s_touch_miss_count;
-            data->state = LV_INDEV_STATE_PRESSED;
-            data->point = s_last_touch_point;
-        } else {
-            s_touch_active = false;
-            s_touch_miss_count = 0;
-            data->state = LV_INDEV_STATE_RELEASED;
-        }
+        /* Match the Waveshare reference driver: never invent pressed samples
+         * after the controller has reported that the finger is up. Synthetic
+         * samples made one physical swipe look like multiple gestures. */
+        data->state = LV_INDEV_STATE_RELEASED;
         return;
     }
 
@@ -128,24 +117,11 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
         point_y = BOARD_LCD_WIDTH - 1;
     }
 
-    /*
-     * LVGL expects coordinates in the unrotated 172 x 640 panel space and
-     * applies the configured 270 degree display transform afterwards. The
-     * touch controller reports X along the 640-pixel edge and Y along the
-     * 172-pixel edge, so the unrotated point is (raw_y, 639 - raw_x).
-     * The resulting screen point is (639 - raw_x, 171 - raw_y), matching the display's
-     * 180 degree orientation.
-     */
-    s_last_touch_point.x = point_y;
-    s_last_touch_point.y = BOARD_LCD_HEIGHT - 1 - point_x;
-    s_touch_miss_count = 0;
-    if (!s_touch_active) {
-        ESP_LOGI(TAG, "touch raw=(%u,%u), screen=(%u,%u)", point_x, point_y,
-                 BOARD_LCD_HEIGHT - 1 - point_x, BOARD_LCD_WIDTH - 1 - point_y);
-    }
-    s_touch_active = true;
+    /* Waveshare's LVGL 9 example supplies the unrotated panel coordinate;
+     * LVGL then applies LV_DISPLAY_ROTATION_270 to obtain screen coordinates. */
     data->state = LV_INDEV_STATE_PRESSED;
-    data->point = s_last_touch_point;
+    data->point.x = point_y;
+    data->point.y = BOARD_LCD_HEIGHT - 1 - point_x;
 }
 
 static void lvgl_tick(void *argument)
@@ -187,20 +163,50 @@ static void lvgl_task(void *argument)
     }
 }
 
-void board_display_set_backlight(uint8_t brightness)
+void board_display_set_backlight(uint8_t percent)
 {
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, brightness);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+    if (percent > 100) {
+        percent = 100;
+    }
+    /* V2/Rev1.1 routes the PWM to GPIO42 and the AP3032 control is active-low.
+     * On the real panel, duty values above roughly 128 already make the image
+     * unreadable, so map the UI's 10..100% onto the useful 115..0 range. */
+    const uint32_t visible_percent = percent < 10U ? 10U : percent;
+    const uint32_t duty = ((100U - visible_percent) * 115U + 45U) / 90U;
+    /* Keep this in the same two calls used by Waveshare. The combined
+     * ledc_set_duty_and_update() API depends on the optional fade service and
+     * can leave the output unchanged when that service is not installed. */
+    esp_err_t error = ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, duty);
+    if (error == ESP_OK) {
+        error = ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+    }
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "set backlight to %u%% failed: %s", percent,
+                 esp_err_to_name(error));
+    } else {
+        ESP_LOGI(TAG, "backlight %u%% (PWM duty %" PRIu32 ")", percent, duty);
+    }
 }
 
 static esp_err_t init_backlight(void)
 {
+    /* Match Waveshare's V2 backlight example: configure GPIO42 as an
+     * output with pull-up before routing the LEDC signal to it. */
+    const gpio_config_t backlight_gpio = {
+        .pin_bit_mask = 1ULL << BOARD_LCD_PIN_BACKLIGHT,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&backlight_gpio), TAG, "backlight GPIO");
+
     const ledc_timer_config_t timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_8_BIT,
         .timer_num = LEDC_TIMER_3,
         .freq_hz = 50000,
-        .clk_cfg = LEDC_AUTO_CLK,
+        .clk_cfg = LEDC_SLOW_CLK_RC_FAST,
     };
     ESP_RETURN_ON_ERROR(ledc_timer_config(&timer), TAG, "backlight timer");
 
@@ -210,7 +216,7 @@ static esp_err_t init_backlight(void)
         .channel = LEDC_CHANNEL_1,
         .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = LEDC_TIMER_3,
-        .duty = 255,
+        .duty = 0,
         .hpoint = 0,
     };
     return ledc_channel_config(&channel);
@@ -227,8 +233,6 @@ static esp_err_t init_touch(void)
         .flags.enable_internal_pullup = true,
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &s_touch_bus), TAG, "touch I2C bus");
-    ESP_RETURN_ON_ERROR(i2c_master_probe(s_touch_bus, BOARD_TOUCH_I2C_ADDRESS, 100), TAG,
-                        "touch controller probe");
 
     const i2c_device_config_t device_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -240,15 +244,6 @@ static esp_err_t init_touch(void)
 
 static esp_err_t init_panel(lv_display_t **lvgl_display)
 {
-    const gpio_config_t reset_config = {
-        .pin_bit_mask = 1ULL << BOARD_LCD_PIN_RESET,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&reset_config), TAG, "LCD reset GPIO");
-
     const spi_bus_config_t bus_config = {
         .data0_io_num = BOARD_LCD_PIN_DATA0,
         .data1_io_num = BOARD_LCD_PIN_DATA1,
@@ -290,12 +285,7 @@ static esp_err_t init_panel(lv_display_t **lvgl_display)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_axs15231b(panel_io, &panel_config, &panel), TAG,
                         "AXS15231B panel");
 
-    gpio_set_level(BOARD_LCD_PIN_RESET, 1);
-    vTaskDelay(pdMS_TO_TICKS(30));
-    gpio_set_level(BOARD_LCD_PIN_RESET, 0);
-    vTaskDelay(pdMS_TO_TICKS(250));
-    gpio_set_level(BOARD_LCD_PIN_RESET, 1);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    ESP_RETURN_ON_ERROR(board_power_reset_display(), TAG, "V2 LCD reset");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "panel init");
 
     lv_display_t *display = lv_display_create(BOARD_LCD_WIDTH, BOARD_LCD_HEIGHT);
@@ -324,6 +314,7 @@ static esp_err_t init_panel(lv_display_t **lvgl_display)
 
 esp_err_t board_display_init(void)
 {
+    ESP_RETURN_ON_ERROR(board_power_prepare_display(), TAG, "V2 display power");
     ESP_RETURN_ON_ERROR(init_backlight(), TAG, "backlight");
     ESP_RETURN_ON_ERROR(init_touch(), TAG, "touch");
 
