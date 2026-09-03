@@ -29,6 +29,31 @@ static volatile bool s_playing;
 static volatile bool s_click_playing;
 static bool s_available;
 
+static void write_silence(void)
+{
+    int16_t silence[128 * 2] = {0};
+    (void)esp_codec_dev_write(s_playback, silence, sizeof(silence));
+}
+
+static bool amplifier_on(void)
+{
+    /* Establish a zero-valued I2S stream before connecting the analog power
+     * amplifier. This removes the power-up transient from the speaker. */
+    write_silence();
+    if (board_power_set_speaker(true) != ESP_OK) {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(8));
+    return true;
+}
+
+static void amplifier_off(void)
+{
+    write_silence();
+    vTaskDelay(pdMS_TO_TICKS(8));
+    (void)board_power_set_speaker(false);
+}
+
 static void alarm_tone_task(void *argument)
 {
     (void)argument;
@@ -36,7 +61,8 @@ static void alarm_tone_task(void *argument)
     uint32_t phase = 0;
     uint32_t block = 0;
     xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
-    while (s_playing) {
+    const bool output_ready = amplifier_on();
+    while (s_playing && output_ready) {
         const bool silent = (block % 8U) >= 6U;
         const uint32_t frequency = (block % 16U) < 8U ? 880U : 660U;
         const uint32_t half_period = ALARM_SAMPLE_RATE / (frequency * 2U);
@@ -55,8 +81,7 @@ static void alarm_tone_task(void *argument)
         }
         block++;
     }
-    memset(samples, 0, sizeof(samples));
-    esp_codec_dev_write(s_playback, samples, sizeof(samples));
+    amplifier_off();
     xSemaphoreGive(s_audio_mutex);
     s_playing = false;
     vTaskDelete(NULL);
@@ -70,7 +95,7 @@ static void click_tone_task(void *argument)
     const uint32_t half_period = ALARM_SAMPLE_RATE / (1500U * 2U);
 
     xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
-    if (!s_playing) {
+    if (!s_playing && amplifier_on()) {
         for (size_t offset = 0; offset < CLICK_SAMPLES; offset += BLOCK_SAMPLES) {
             const size_t count = CLICK_SAMPLES - offset < BLOCK_SAMPLES
                                      ? CLICK_SAMPLES - offset
@@ -91,6 +116,7 @@ static void click_tone_task(void *argument)
                 break;
             }
         }
+        amplifier_off();
     }
     xSemaphoreGive(s_audio_mutex);
     s_click_playing = false;
@@ -102,7 +128,7 @@ esp_err_t alarm_audio_init(void)
     i2c_master_bus_handle_t i2c_bus = NULL;
     ESP_RETURN_ON_ERROR(i2c_master_get_bus_handle(BOARD_RTC_I2C_PORT, &i2c_bus), TAG,
                         "get codec I2C bus");
-    ESP_RETURN_ON_ERROR(board_power_set_speaker(true), TAG, "speaker amplifier");
+    ESP_RETURN_ON_ERROR(board_power_set_speaker(false), TAG, "mute speaker amplifier");
 
     i2s_chan_config_t channel_config = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     channel_config.auto_clear = true;
@@ -167,6 +193,7 @@ esp_err_t alarm_audio_init(void)
     if (esp_codec_dev_set_out_mute(s_playback, false) != ESP_CODEC_DEV_OK) {
         return ESP_FAIL;
     }
+    write_silence();
     s_audio_mutex = xSemaphoreCreateMutex();
     if (s_audio_mutex == NULL) {
         return ESP_ERR_NO_MEM;

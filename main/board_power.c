@@ -15,6 +15,8 @@
 
 static const char *TAG = "board_power";
 static i2c_master_dev_handle_t s_expander;
+static portMUX_TYPE s_button_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_short_press_pending;
 static esp_err_t set_output(uint8_t mask, bool high);
 
 static void power_button_task(void *argument)
@@ -34,6 +36,16 @@ static void power_button_task(void *argument)
                 ESP_LOGI(TAG, "power button armed");
             }
         } else if (!pressed) {
+            if (pressed_since_us != 0) {
+                const int64_t press_duration_us = esp_timer_get_time() - pressed_since_us;
+                if (press_duration_us >= 50000 &&
+                    press_duration_us < (int64_t)BOARD_POWER_LONG_PRESS_MS * 1000) {
+                    portENTER_CRITICAL(&s_button_lock);
+                    s_short_press_pending = true;
+                    portEXIT_CRITICAL(&s_button_lock);
+                    ESP_LOGI(TAG, "power button short press");
+                }
+            }
             pressed_since_us = 0;
         } else if (pressed_since_us == 0) {
             pressed_since_us = esp_timer_get_time();
@@ -92,6 +104,11 @@ esp_err_t board_power_init(void)
     };
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(bus, &device_config, &s_expander), TAG,
                         "add TCA9554");
+    /* The expander survives an ESP reset while USB remains connected. Mute the
+     * amplifier before configuring any clocks so stale/high output state cannot
+     * amplify I2S pin noise during a firmware restart. */
+    ESP_RETURN_ON_ERROR(set_output(BOARD_AUDIO_AMP_PIN_MASK, false), TAG,
+                        "mute speaker amplifier at boot");
     ESP_RETURN_ON_ERROR(set_output(BOARD_POWER_HOLD_PIN_MASK, true), TAG,
                         "latch battery power");
 
@@ -148,4 +165,13 @@ esp_err_t board_power_set_speaker(bool enabled)
     ESP_LOGI(TAG, "speaker amplifier %s through TCA9554 IO7",
              enabled ? "enabled" : "disabled");
     return ESP_OK;
+}
+
+bool board_power_take_short_press(void)
+{
+    portENTER_CRITICAL(&s_button_lock);
+    const bool pending = s_short_press_pending;
+    s_short_press_pending = false;
+    portEXIT_CRITICAL(&s_button_lock);
+    return pending;
 }

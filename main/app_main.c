@@ -9,6 +9,7 @@
 #include "study_ui.h"
 #include "time_sync.h"
 #include "wifi_manager.h"
+#include "weather_manager.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -40,6 +41,10 @@ void app_main(void)
     ESP_ERROR_CHECK(app_settings_init());
     ESP_ERROR_CHECK(wifi_manager_init());
     ESP_ERROR_CHECK(time_sync_init());
+    err = weather_manager_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "weather manager unavailable: %s", esp_err_to_name(err));
+    }
 
     err = battery_monitor_init();
     if (err != ESP_OK) {

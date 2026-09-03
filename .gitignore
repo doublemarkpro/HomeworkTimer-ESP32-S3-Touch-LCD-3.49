@@ -4,3 +4,4 @@
 /sdkconfig.old
 *.log
 .vscode/settings.json
+/main/weather_private.h

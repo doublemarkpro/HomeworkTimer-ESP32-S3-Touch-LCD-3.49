@@ -222,6 +222,11 @@ esp_err_t wifi_manager_disconnect(void)
     return ESP_OK;
 }
 
+esp_err_t wifi_manager_set_low_power(bool enabled)
+{
+    return esp_wifi_set_ps(enabled ? WIFI_PS_MAX_MODEM : WIFI_PS_MIN_MODEM);
+}
+
 void wifi_manager_get_status(wifi_manager_status_t *status)
 {
     if (status == NULL) {

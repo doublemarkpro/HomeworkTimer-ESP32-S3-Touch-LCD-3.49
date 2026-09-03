@@ -11,7 +11,28 @@ idf_component_register(
         "study_store.c"
         "study_ui.c"
         "time_sync.c"
+        "weather_manager.c"
         "ui_font_16.c"
+        "ui_font_bold_20.c"
+        "ui_font_title_24.c"
+        "assets/ui_icon_book.c"
+        "assets/ui_icon_compass.c"
+        "assets/ui_icon_english.c"
+        "assets/ui_icon_cup.c"
+        "assets/ui_icon_gear.c"
+        "assets/ui_icon_star.c"
+        "assets/ui_icon_weather_sunny.c"
+        "assets/ui_icon_weather_partly_cloudy.c"
+        "assets/ui_icon_weather_cloudy.c"
+        "assets/ui_icon_weather_rain.c"
+        "assets/ui_icon_weather_thunder.c"
+        "assets/ui_icon_weather_snow.c"
+        "assets/ui_icon_weather_fog.c"
+        "assets/ui_icon_menu_report.c"
+        "assets/ui_icon_menu_schedule.c"
+        "assets/ui_icon_menu_alarm.c"
+        "assets/ui_icon_menu_wifi.c"
+        "assets/ui_icon_menu_home.c"
         "wifi_manager.c"
     INCLUDE_DIRS "."
     REQUIRES
@@ -25,7 +46,10 @@ idf_component_register(
         esp_timer
         esp_event
         esp_netif
+        esp_rom
         esp_wifi
+        esp_http_client
+        esp-tls
         nvs_flash
         lvgl
         esp_lcd_axs15231b

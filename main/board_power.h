@@ -8,3 +8,4 @@ esp_err_t board_power_init(void);
 esp_err_t board_power_prepare_display(void);
 esp_err_t board_power_reset_display(void);
 esp_err_t board_power_set_speaker(bool enabled);
+bool board_power_take_short_press(void);

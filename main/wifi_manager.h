@@ -35,6 +35,6 @@ esp_err_t wifi_manager_init(void);
 esp_err_t wifi_manager_scan(void);
 esp_err_t wifi_manager_connect(const char *ssid, const char *password);
 esp_err_t wifi_manager_disconnect(void);
+esp_err_t wifi_manager_set_low_power(bool enabled);
 void wifi_manager_get_status(wifi_manager_status_t *status);
 size_t wifi_manager_get_networks(wifi_manager_network_t *networks, size_t capacity);
-

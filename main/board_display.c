@@ -32,6 +32,14 @@ static i2c_master_dev_handle_t s_touch_device;
 static uint16_t *s_dma_buffer;
 static uint8_t *s_rotated_buffer;
 static int64_t s_last_touch_error_log_us;
+static esp_lcd_panel_handle_t s_panel;
+static lv_indev_t *s_touch_input;
+static uint8_t s_last_backlight_percent = 100;
+static bool s_display_sleeping;
+static bool s_touch_release_gate;
+static int64_t s_touch_release_since_us;
+
+#define TOUCH_RELEASE_STABLE_US 250000
 
 static const axs15231b_lcd_init_cmd_t s_lcd_init_commands[] = {
     {0x11, (uint8_t[]){0x00}, 0, 100},
@@ -96,10 +104,31 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
     uint8_t response[32] = {0};
     const esp_err_t err = i2c_master_transmit_receive(
         s_touch_device, command, sizeof(command), response, sizeof(response), 100);
+    const int64_t now_us = esp_timer_get_time();
+    const bool valid_sample = err == ESP_OK;
+    const bool raw_pressed = valid_sample && response[1] > 0 && response[1] < 5;
+
+    if (s_touch_release_gate) {
+        /* Screen replacement must never inherit the touch that unlocked it.
+         * Require a continuous, trustworthy released interval because this
+         * controller can briefly report zero points during a long press. */
+        if (!valid_sample || raw_pressed) {
+            s_touch_release_since_us = 0;
+        } else if (s_touch_release_since_us == 0) {
+            s_touch_release_since_us = now_us;
+        } else if (now_us - s_touch_release_since_us >= TOUCH_RELEASE_STABLE_US) {
+            s_touch_release_gate = false;
+            s_touch_release_since_us = 0;
+            ESP_LOGI(TAG, "touch release gate cleared");
+        }
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
     if (err != ESP_OK || response[1] == 0 || response[1] >= 5) {
-        if (err != ESP_OK && esp_timer_get_time() - s_last_touch_error_log_us > 1000000) {
+        if (err != ESP_OK && now_us - s_last_touch_error_log_us > 1000000) {
             ESP_LOGW(TAG, "touch I2C read failed: %s", esp_err_to_name(err));
-            s_last_touch_error_log_us = esp_timer_get_time();
+            s_last_touch_error_log_us = now_us;
         }
         /* Match the Waveshare reference driver: never invent pressed samples
          * after the controller has reported that the finger is up. Synthetic
@@ -122,6 +151,16 @@ static void touch_read(lv_indev_t *input, lv_indev_data_t *data)
     data->state = LV_INDEV_STATE_PRESSED;
     data->point.x = point_y;
     data->point.y = BOARD_LCD_HEIGHT - 1 - point_x;
+}
+
+void board_display_block_touch_until_release(void)
+{
+    s_touch_release_since_us = 0;
+    s_touch_release_gate = true;
+    if (s_touch_input != NULL) {
+        lv_indev_wait_release(s_touch_input);
+    }
+    ESP_LOGI(TAG, "touch blocked until stable release");
 }
 
 static void lvgl_tick(void *argument)
@@ -168,11 +207,15 @@ void board_display_set_backlight(uint8_t percent)
     if (percent > 100) {
         percent = 100;
     }
+    if (percent > 0) {
+        s_last_backlight_percent = percent;
+    }
     /* V2/Rev1.1 routes the PWM to GPIO42 and the AP3032 control is active-low.
      * On the real panel, duty values above roughly 128 already make the image
      * unreadable, so map the UI's 10..100% onto the useful 115..0 range. */
     const uint32_t visible_percent = percent < 10U ? 10U : percent;
-    const uint32_t duty = ((100U - visible_percent) * 115U + 45U) / 90U;
+    const uint32_t duty = percent == 0 ? 255U
+                                       : ((100U - visible_percent) * 115U + 45U) / 90U;
     /* Keep this in the same two calls used by Waveshare. The combined
      * ledc_set_duty_and_update() API depends on the optional fade service and
      * can leave the output unchanged when that service is not installed. */
@@ -186,6 +229,41 @@ void board_display_set_backlight(uint8_t percent)
     } else {
         ESP_LOGI(TAG, "backlight %u%% (PWM duty %" PRIu32 ")", percent, duty);
     }
+}
+
+esp_err_t board_display_set_sleeping(bool sleeping)
+{
+    if (s_panel == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (sleeping == s_display_sleeping) {
+        return ESP_OK;
+    }
+
+    esp_err_t first_error = ESP_OK;
+    if (sleeping) {
+        if (s_touch_input != NULL) {
+            lv_indev_enable(s_touch_input, false);
+        }
+        board_display_set_backlight(0);
+        /* AXS15231B on this 172x640 panel corrupts its scan state after the
+         * generic display-off/display-on command pair. Keep the controller
+         * initialized and save power through the backlight, touch polling,
+         * amplifier and Wi-Fi instead. */
+        const esp_err_t speaker_error = board_power_set_speaker(false);
+        if (speaker_error != ESP_OK && first_error == ESP_OK) first_error = speaker_error;
+    } else {
+        /* The audio module owns amplifier enable and turns it on only while a
+         * click or alarm is actually playing. Leaving it off here prevents a
+         * wake/reset pop and saves idle power. */
+        board_display_set_backlight(s_last_backlight_percent);
+        if (s_touch_input != NULL) {
+            lv_indev_enable(s_touch_input, true);
+        }
+    }
+    s_display_sleeping = sleeping;
+    ESP_LOGI(TAG, "display %s", sleeping ? "sleeping" : "awake");
+    return first_error;
 }
 
 static esp_err_t init_backlight(void)
@@ -308,6 +386,7 @@ static esp_err_t init_panel(lv_display_t **lvgl_display)
      * transform by 180 degrees compared with the previous 90 degree setup.
      */
     lv_display_set_rotation(display, LV_DISPLAY_ROTATION_270);
+    s_panel = panel;
     *lvgl_display = display;
     return ESP_OK;
 }
@@ -331,6 +410,7 @@ esp_err_t board_display_init(void)
     lv_indev_set_display(input, display);
     lv_indev_set_read_cb(input, touch_read);
     lv_timer_set_period(lv_indev_get_read_timer(input), 10);
+    s_touch_input = input;
 
     const esp_timer_create_args_t tick_args = {
         .callback = lvgl_tick,
