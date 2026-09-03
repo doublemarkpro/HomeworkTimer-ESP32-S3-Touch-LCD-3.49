@@ -21,6 +21,7 @@ idf_component_register(
         "assets/ui_icon_cup.c"
         "assets/ui_icon_gear.c"
         "assets/ui_icon_star.c"
+        "assets/ui_icon_focus.c"
         "assets/ui_icon_weather_sunny.c"
         "assets/ui_icon_weather_partly_cloudy.c"
         "assets/ui_icon_weather_cloudy.c"
@@ -54,6 +55,8 @@ idf_component_register(
         lvgl
         esp_lcd_axs15231b
         esp_codec_dev
+    EMBED_FILES
+        "button_click.pcm"
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra)

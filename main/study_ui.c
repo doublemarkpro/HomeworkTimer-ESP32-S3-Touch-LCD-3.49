@@ -255,9 +255,9 @@ static void format_minutes(uint32_t seconds, char *buffer, size_t length)
 {
     const uint32_t minutes = (seconds + 30U) / 60U;
     if (minutes < 60U) {
-        snprintf(buffer, length, "%" PRIu32 "分", minutes);
+        snprintf(buffer, length, "%" PRIu32 "分钟", minutes);
     } else {
-        snprintf(buffer, length, "%" PRIu32 "时%02" PRIu32 "分", minutes / 60U,
+        snprintf(buffer, length, "%" PRIu32 "时%02" PRIu32 "分钟", minutes / 60U,
                  minutes % 60U);
     }
 }
@@ -695,7 +695,7 @@ static void update_weather_page(bool force)
     s_weather_generation = status.generation;
     const bool ready = status.state == WEATHER_READY &&
                        status.day_count == WEATHER_FORECAST_DAYS;
-    const char *state_text = "三日天气";
+    const char *state_text = "";
     if (!ready) {
         if (status.state == WEATHER_CONFIG_REQUIRED) {
             state_text = "天气未配置";
@@ -712,7 +712,7 @@ static void update_weather_page(bool force)
                                 lv_color_hex(ready ? COLOR_BREAK : COLOR_MUTED), 0);
 
     static const char *const day_names[WEATHER_FORECAST_DAYS] = {
-        "今天", "第二天", "第三天",
+        "今天", "明天", "后天",
     };
     for (uint8_t index = 0; index < WEATHER_FORECAST_DAYS; ++index) {
         char date_text[20];
@@ -750,6 +750,25 @@ static void weather_event(lv_event_t *event)
     if (status.state != WEATHER_READY && status.state != WEATHER_LOADING) {
         weather_manager_refresh();
     }
+}
+
+static void weather_refresh_event(lv_event_t *event)
+{
+    (void)event;
+    weather_status_t status;
+    weather_manager_get_status(&status);
+    if (status.state == WEATHER_CONFIG_REQUIRED) {
+        if (s_weather_status_label != NULL) {
+            lv_label_set_text(s_weather_status_label, "天气未配置");
+        }
+        return;
+    }
+    if (s_weather_status_label != NULL) {
+        lv_label_set_text(s_weather_status_label, "正在更新天气");
+        lv_obj_set_style_text_color(s_weather_status_label,
+                                    lv_color_hex(COLOR_MUTED), 0);
+    }
+    weather_manager_refresh();
 }
 
 static void update_home_status_icons(bool force_battery)
@@ -906,11 +925,9 @@ static void show_home(void)
     style_surface(weather_card, COLOR_WEATHER, COLOR_WEATHER_2, 14, 2);
     lv_obj_add_event_cb(weather_card, touch_sound_event, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(weather_card, weather_event, LV_EVENT_CLICKED, NULL);
-    add_image_icon(weather_card, &ui_icon_weather_partly_cloudy, 25, 10);
+    add_image_icon(weather_card, &ui_icon_weather_partly_cloudy, 25, 6);
     make_label(weather_card, "天气", FONT_CJK_BOLD, COLOR_TEXT, 0, 76, 110, 27,
                LV_TEXT_ALIGN_CENTER);
-    make_label(weather_card, "三日天气", FONT_CJK, COLOR_TEXT,
-               0, 113, 110, 22, LV_TEXT_ALIGN_CENTER);
 
     lv_obj_t *more_card = lv_button_create(carousel);
     lv_obj_set_pos(more_card, 590, 10);
@@ -929,24 +946,18 @@ static void show_weather(void)
     s_screen = SCREEN_WEATHER;
     lv_obj_t *root = prepare_screen();
 
-    make_label(root, "Qingdao 天气", FONT_CJK_BOLD, COLOR_TEXT, 8, 10, 124, 31,
+    make_label(root, "三日天气", FONT_CJK_BOLD, COLOR_TEXT, 8, 8, 124, 31,
                LV_TEXT_ALIGN_CENTER);
     s_weather_status_label = make_label(root, "正在更新天气", FONT_CJK,
-                                        COLOR_MUTED, 8, 48, 124, 24,
+                                        COLOR_MUTED, 8, 40, 124, 24,
                                         LV_TEXT_ALIGN_CENTER);
-    make_label(root, "QWeather", LV_FONT_DEFAULT, COLOR_MUTED, 8, 75, 124, 18,
-               LV_TEXT_ALIGN_CENTER);
 
-    lv_obj_t *back = lv_button_create(root);
-    lv_obj_set_pos(back, 22, 105);
-    lv_obj_set_size(back, 96, 51);
-    style_surface(back, COLOR_CHINESE, COLOR_CHINESE_2, 13, 2);
-    lv_obj_add_event_cb(back, touch_sound_event, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(back, home_event, LV_EVENT_CLICKED, NULL);
-    add_image_icon(back, &ui_icon_menu_home, 7, 0);
-    lv_obj_t *back_text = make_label(back, "返回", FONT_CJK_BOLD, COLOR_TEXT,
-                                     45, 11, 46, 28, LV_TEXT_ALIGN_CENTER);
-    lv_obj_move_foreground(back_text);
+    lv_obj_t *refresh_button = make_button(root, "刷新", COLOR_WEATHER, COLOR_WEATHER_2,
+                                           12, 66, 108, 42,
+                                           weather_refresh_event, NULL);
+    lv_obj_set_style_text_font(lv_obj_get_child(refresh_button, 0), FONT_CJK, 0);
+    make_button(root, "返回", COLOR_CHINESE, COLOR_CHINESE_2, 12, 116, 108, 44,
+                home_event, NULL);
 
     static const int card_x[WEATHER_FORECAST_DAYS] = {140, 305, 470};
     static const uint32_t card_colors[WEATHER_FORECAST_DAYS] = {
@@ -958,7 +969,7 @@ static void show_weather(void)
     for (uint8_t index = 0; index < WEATHER_FORECAST_DAYS; ++index) {
         lv_obj_t *card = make_panel(root, card_x[index], 9, 155, 154,
                                     card_colors[index], card_dark_colors[index]);
-        s_weather_day_dates[index] = make_label(card, "--", FONT_CJK_BOLD,
+        s_weather_day_dates[index] = make_label(card, "--", FONT_CJK,
                                                 COLOR_TEXT, 5, 5, 145, 26,
                                                 LV_TEXT_ALIGN_CENTER);
         s_weather_day_images[index] = add_image_icon(card, &ui_icon_weather_cloudy,
@@ -1143,9 +1154,9 @@ static void show_report(void)
     }
 
     make_shape(root, 445, 17, 1, 138, COLOR_MUTED, LV_OPA_30, 1);
-    make_label(root, LV_SYMBOL_LOOP, LV_FONT_DEFAULT, COLOR_BREAK, 454, 17, 22, 23,
-               LV_TEXT_ALIGN_CENTER);
-    make_label(root, "专注", FONT_CJK, COLOR_BREAK, 478, 16, 58, 23,
+    lv_obj_t *focus_icon = add_image_icon(root, &ui_icon_focus, 439, 0);
+    lv_image_set_scale(focus_icon, 128);
+    make_label(root, "专注", FONT_CJK, COLOR_BREAK, 488, 16, 50, 23,
                LV_TEXT_ALIGN_LEFT);
     char total[40];
     format_minutes(study_store_focus_seconds(), total, sizeof(total));
@@ -1155,7 +1166,7 @@ static void show_report(void)
 
     lv_obj_t *small_cup = add_image_icon(root, &ui_icon_cup, 439, 72);
     lv_image_set_scale(small_cup, 128);
-    make_label(root, "休息", FONT_CJK, COLOR_BREAK, 478, 91, 58, 23,
+    make_label(root, "休息", FONT_CJK, COLOR_BREAK, 488, 91, 50, 23,
                LV_TEXT_ALIGN_LEFT);
     char rest[40];
     format_minutes(week->break_seconds, rest, sizeof(rest));
@@ -1213,20 +1224,31 @@ static void show_menu(void)
 static void button_sound_switch_event(lv_event_t *event)
 {
     lv_obj_t *sound_switch = lv_event_get_target_obj(event);
-    const bool enabled = lv_obj_has_state(sound_switch, LV_STATE_CHECKED);
     const bool was_enabled = app_settings_button_sound_enabled();
+    const bool enabled = !was_enabled;
+
+    /* The touch controller can briefly report RELEASED while a finger is still
+     * down.  LVGL's checkable switch would then see two clicks and immediately
+     * undo the first one.  Toggle explicitly on the first press and suppress
+     * input until the controller has reported a stable release. */
+    board_display_block_touch_until_release();
     if (was_enabled) {
         alarm_audio_click();
     }
     const esp_err_t err = app_settings_set_button_sound(enabled);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save button sound setting failed: %s", esp_err_to_name(err));
+        return;
     }
+    if (enabled) {
+        lv_obj_add_state(sound_switch, LV_STATE_CHECKED);
+    } else {
+        lv_obj_remove_state(sound_switch, LV_STATE_CHECKED);
+    }
+    lv_obj_send_event(sound_switch, LV_EVENT_VALUE_CHANGED, NULL);
     if (!was_enabled && enabled) {
         alarm_audio_click();
     }
-    /* Recreating the whole page here left the finger over a brand-new switch,
-     * so one physical tap could toggle off and immediately back on. */
     if (s_sound_status_label != NULL) {
         lv_label_set_text(s_sound_status_label, enabled ? "已开启" : "已关闭");
         lv_obj_set_style_text_color(s_sound_status_label,
@@ -1352,10 +1374,11 @@ static void show_settings(void)
     lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_BREAK),
                               LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_TEXT), LV_PART_KNOB);
+    lv_obj_remove_flag(sound_switch, LV_OBJ_FLAG_CHECKABLE);
     if (app_settings_button_sound_enabled()) {
         lv_obj_add_state(sound_switch, LV_STATE_CHECKED);
     }
-    lv_obj_add_event_cb(sound_switch, button_sound_switch_event, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sound_switch, button_sound_switch_event, LV_EVENT_PRESSED, NULL);
 
     make_shape(panel, 20, 38, 405, 1, COLOR_CHINESE, LV_OPA_40, 0);
     lv_obj_t *volume_row = make_settings_row(panel, 39);

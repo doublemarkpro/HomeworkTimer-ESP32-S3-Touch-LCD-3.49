@@ -18,6 +18,7 @@ ICON_SIZES = {
     "cup": 56,
     "gear": 48,
     "star": 72,
+    "focus": 56,
     "weather_sunny": 60,
     "weather_partly_cloudy": 60,
     "weather_cloudy": 60,

@@ -16,6 +16,11 @@
 #include "freertos/task.h"
 
 #define ALARM_SAMPLE_RATE 24000
+#define CLICK_AMP_SETTLE_MS 40
+#define CLICK_DRAIN_MS 120
+
+extern const uint8_t button_click_pcm_start[] asm("_binary_button_click_pcm_start");
+extern const uint8_t button_click_pcm_end[] asm("_binary_button_click_pcm_end");
 
 static const char *TAG = "alarm_audio";
 static i2s_chan_handle_t s_tx;
@@ -43,7 +48,7 @@ static bool amplifier_on(void)
     if (board_power_set_speaker(true) != ESP_OK) {
         return false;
     }
-    vTaskDelay(pdMS_TO_TICKS(8));
+    vTaskDelay(pdMS_TO_TICKS(CLICK_AMP_SETTLE_MS));
     return true;
 }
 
@@ -90,32 +95,25 @@ static void alarm_tone_task(void *argument)
 static void click_tone_task(void *argument)
 {
     (void)argument;
-    enum { CLICK_SAMPLES = 1200, BLOCK_SAMPLES = 240 };
-    int16_t samples[BLOCK_SAMPLES * 2];
-    const uint32_t half_period = ALARM_SAMPLE_RATE / (1500U * 2U);
-
     xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
     if (!s_playing && amplifier_on()) {
-        for (size_t offset = 0; offset < CLICK_SAMPLES; offset += BLOCK_SAMPLES) {
-            const size_t count = CLICK_SAMPLES - offset < BLOCK_SAMPLES
-                                     ? CLICK_SAMPLES - offset
-                                     : BLOCK_SAMPLES;
-            for (size_t sample = 0; sample < count; ++sample) {
-                const size_t index = offset + sample;
-                const int32_t envelope =
-                    18000 * (CLICK_SAMPLES - (int32_t)index) / CLICK_SAMPLES;
-                const int16_t value = ((index / half_period) & 1U) != 0
-                                          ? (int16_t)envelope
-                                          : (int16_t)-envelope;
-                samples[sample * 2] = value;
-                samples[sample * 2 + 1] = value;
-            }
-            if (esp_codec_dev_write(s_playback, samples,
-                                    (int)(count * 2 * sizeof(int16_t))) != ESP_CODEC_DEV_OK) {
-                ESP_LOGW(TAG, "button click audio write failed");
+        const size_t length = (size_t)(button_click_pcm_end - button_click_pcm_start);
+        size_t offset = 0;
+        while (offset < length) {
+            const size_t remaining = length - offset;
+            const int chunk = (int)(remaining < 256U ? remaining : 256U);
+            if (esp_codec_dev_write(s_playback,
+                                    (void *)(button_click_pcm_start + offset), chunk) !=
+                ESP_CODEC_DEV_OK) {
+                ESP_LOGW(TAG, "button click PCM write failed at %u bytes",
+                         (unsigned)offset);
                 break;
             }
+            offset += (size_t)chunk;
         }
+        /* Short clips fit in the DMA queue, so write() can return before the
+         * speaker has rendered them. Keep IO7 high until the queue drains. */
+        vTaskDelay(pdMS_TO_TICKS(CLICK_DRAIN_MS));
         amplifier_off();
     }
     xSemaphoreGive(s_audio_mutex);

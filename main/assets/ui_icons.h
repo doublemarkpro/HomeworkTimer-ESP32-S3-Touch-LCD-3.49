@@ -8,6 +8,7 @@ extern const lv_image_dsc_t ui_icon_english;
 extern const lv_image_dsc_t ui_icon_cup;
 extern const lv_image_dsc_t ui_icon_gear;
 extern const lv_image_dsc_t ui_icon_star;
+extern const lv_image_dsc_t ui_icon_focus;
 extern const lv_image_dsc_t ui_icon_weather_sunny;
 extern const lv_image_dsc_t ui_icon_weather_partly_cloudy;
 extern const lv_image_dsc_t ui_icon_weather_cloudy;

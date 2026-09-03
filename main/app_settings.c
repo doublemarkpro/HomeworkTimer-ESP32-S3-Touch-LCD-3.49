@@ -102,10 +102,11 @@ bool app_settings_button_sound_enabled(void)
 
 esp_err_t app_settings_set_button_sound(bool enabled)
 {
-    s_button_sound = enabled;
     ESP_RETURN_ON_ERROR(nvs_set_u8(s_nvs, BUTTON_SOUND_KEY, enabled ? 1 : 0), TAG,
                         "write button sound");
-    return nvs_commit(s_nvs);
+    ESP_RETURN_ON_ERROR(nvs_commit(s_nvs), TAG, "commit button sound");
+    s_button_sound = enabled;
+    return ESP_OK;
 }
 
 uint8_t app_settings_volume(void)
