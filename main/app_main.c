@@ -55,7 +55,8 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "alarm audio unavailable: %s", esp_err_to_name(err));
     } else {
-        ESP_ERROR_CHECK(alarm_audio_set_volume(app_settings_volume()));
+        const uint8_t saved_volume = app_settings_volume();
+        ESP_ERROR_CHECK(alarm_audio_set_volume(saved_volume < 10 ? 0 : saved_volume));
     }
 
     ESP_ERROR_CHECK(board_display_init());

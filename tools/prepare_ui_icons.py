@@ -31,6 +31,12 @@ ICON_SIZES = {
     "menu_alarm": 56,
     "menu_wifi": 56,
     "menu_home": 56,
+    "settings_duration": 60,
+    "settings_volume": 60,
+    "settings_brightness": 60,
+    "settings_lock": 60,
+    "settings_back": 60,
+    "lock_unlock": 60,
 }
 
 

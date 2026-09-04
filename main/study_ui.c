@@ -21,13 +21,17 @@
 #include "weather_manager.h"
 
 LV_FONT_DECLARE(ui_font_16);
+LV_FONT_DECLARE(ui_font_bold_16);
 LV_FONT_DECLARE(ui_font_bold_20);
+LV_FONT_DECLARE(ui_font_clock_bold_56);
 LV_FONT_DECLARE(ui_font_title_24);
 
 #define FONT_CJK (&ui_font_16)
+#define FONT_CJK_SMALL_BOLD (&ui_font_bold_16)
 #define FONT_CJK_BOLD (&ui_font_bold_20)
 #define FONT_CJK_TITLE (&ui_font_title_24)
 #define FONT_TIMER_CJK FONT_CJK_BOLD
+#define FONT_LOCK_CLOCK (&ui_font_clock_bold_56)
 
 #if LV_FONT_MONTSERRAT_48
 #define FONT_TIMER (&lv_font_montserrat_48)
@@ -175,7 +179,6 @@ static lv_obj_t *s_alarm_switch;
 static lv_obj_t *s_alarm_status_label;
 static lv_obj_t *s_volume_label;
 static lv_obj_t *s_brightness_label;
-static lv_obj_t *s_sound_status_label;
 static lv_obj_t *s_auto_lock_label;
 static lv_obj_t *s_focus_goal_labels[3];
 static lv_obj_t *s_lock_clock_label;
@@ -207,6 +210,8 @@ static bool s_schedule_drag_active;
 static lv_point_t s_schedule_drag_start;
 static int64_t s_last_battery_poll_ms;
 static int16_t s_displayed_battery_percent = -1;
+static bool s_last_usb_powered;
+static bool s_usb_state_known;
 static bool s_locked;
 static bool s_display_sleeping;
 static bool s_unlock_long_press_confirmed;
@@ -298,7 +303,7 @@ static void style_surface(lv_obj_t *object, uint32_t color, uint32_t dark_color,
 static void touch_sound_event(lv_event_t *event)
 {
     (void)event;
-    if (app_settings_button_sound_enabled()) {
+    if (app_settings_volume() >= 10) {
         alarm_audio_click();
     }
 }
@@ -352,32 +357,6 @@ static lv_obj_t *make_shape(lv_obj_t *parent, int x, int y, int width, int heigh
     lv_obj_set_style_border_width(shape, 0, 0);
     lv_obj_set_style_pad_all(shape, 0, 0);
     return shape;
-}
-
-static void make_settings_icon(lv_obj_t *row, const char *symbol, uint32_t color)
-{
-    lv_obj_t *badge = make_shape(row, 14, 0, 30, 30, COLOR_PANEL, LV_OPA_COVER,
-                                   LV_RADIUS_CIRCLE);
-    lv_obj_align(badge, LV_ALIGN_LEFT_MID, 14, 0);
-    lv_obj_set_style_border_width(badge, 1, 0);
-    lv_obj_set_style_border_color(badge, lv_color_hex(color), 0);
-    /* LV_SYMBOL_* glyphs live in LVGL's Montserrat font, not in the custom
-     * Chinese font. Using the CJK font here renders private-use glyphs as boxes. */
-    lv_obj_t *icon = make_label(badge, symbol, FONT_VALUE, color, 0, 0, 30, 24,
-                                 LV_TEXT_ALIGN_CENTER);
-    lv_obj_align(icon, LV_ALIGN_CENTER, 0, 2);
-}
-
-static lv_obj_t *make_settings_row(lv_obj_t *panel, int y)
-{
-    lv_obj_t *row = lv_obj_create(panel);
-    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_pos(row, 0, y);
-    lv_obj_set_size(row, 455, 39);
-    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_style_pad_all(row, 0, 0);
-    return row;
 }
 
 static lv_obj_t *add_image_icon(lv_obj_t *parent, const lv_image_dsc_t *source,
@@ -445,8 +424,9 @@ static lv_obj_t *make_subject_card(lv_obj_t *parent, uint8_t subject, int x,
     make_label(card, s_subject_names[subject], FONT_CJK_BOLD, COLOR_TEXT, 0, 76, 110, 27,
                LV_TEXT_ALIGN_CENTER);
     char weekly[32];
-    snprintf(weekly, sizeof(weekly), "本周 %" PRIu32 " 分", weekly_minutes);
-    make_label(card, weekly, FONT_CJK, COLOR_TEXT, 0, 112, 110, 23, LV_TEXT_ALIGN_CENTER);
+    snprintf(weekly, sizeof(weekly), "本周%" PRIu32 "分钟", weekly_minutes);
+    make_label(card, weekly, FONT_CJK_SMALL_BOLD, COLOR_TEXT, 0, 112, 110, 23,
+               LV_TEXT_ALIGN_CENTER);
     return card;
 }
 
@@ -489,7 +469,6 @@ static lv_obj_t *prepare_screen(void)
     s_alarm_status_label = NULL;
     s_volume_label = NULL;
     s_brightness_label = NULL;
-    s_sound_status_label = NULL;
     s_auto_lock_label = NULL;
     memset(s_focus_goal_labels, 0, sizeof(s_focus_goal_labels));
     s_lock_clock_label = NULL;
@@ -817,6 +796,21 @@ static void update_home_status_icons(bool force_battery)
         return;
     }
 
+    /* Voltage can legitimately move in either direction after load changes.
+     * The old USB-dependent one-way clamp could permanently pin an inaccurate
+     * value. Apply a small hysteresis and move one point per sample instead. */
+    if (s_displayed_battery_percent < 0 || !s_usb_state_known ||
+        usb_powered != s_last_usb_powered) {
+        s_displayed_battery_percent = percent;
+    } else if (percent >= s_displayed_battery_percent + 2) {
+        ++s_displayed_battery_percent;
+    } else if (percent + 2 <= s_displayed_battery_percent) {
+        --s_displayed_battery_percent;
+    }
+    s_usb_state_known = true;
+    s_last_usb_powered = usb_powered;
+    percent = (uint8_t)s_displayed_battery_percent;
+
     const char *symbol = LV_SYMBOL_BATTERY_EMPTY;
     if (percent >= 88) {
         symbol = LV_SYMBOL_BATTERY_FULL;
@@ -827,16 +821,6 @@ static void update_home_status_icons(bool force_battery)
     } else if (percent >= 13) {
         symbol = LV_SYMBOL_BATTERY_1;
     }
-    /* A voltage-derived percentage naturally moves by about one percent with
-     * load and ADC noise. While USB is present a charging indication must not
-     * count backwards; on battery it must not climb spuriously. */
-    if (s_displayed_battery_percent < 0) {
-        s_displayed_battery_percent = percent;
-    } else if ((usb_powered && percent > s_displayed_battery_percent) ||
-               (!usb_powered && percent < s_displayed_battery_percent)) {
-        s_displayed_battery_percent = percent;
-    }
-    percent = (uint8_t)s_displayed_battery_percent;
     char percentage[8];
     snprintf(percentage, sizeof(percentage), "%u%%", percent);
     lv_label_set_text(s_home_battery_icon, symbol);
@@ -921,9 +905,10 @@ static void show_home(void)
     make_label(break_card, "休息", FONT_CJK_BOLD, COLOR_TEXT, 0, 76, 110, 27,
                LV_TEXT_ALIGN_CENTER);
     char break_minutes[24];
-    snprintf(break_minutes, sizeof(break_minutes), "%" PRIu32 " 分",
+    snprintf(break_minutes, sizeof(break_minutes), "本周%" PRIu32 "分钟",
              (week->break_seconds + 30U) / 60U);
-    make_label(break_card, break_minutes, FONT_CJK, COLOR_TEXT, 0, 113, 110, 22,
+    make_label(break_card, break_minutes, FONT_CJK_SMALL_BOLD, COLOR_TEXT,
+               0, 112, 110, 23,
                LV_TEXT_ALIGN_CENTER);
 
     lv_obj_t *weather_card = lv_button_create(carousel);
@@ -959,10 +944,8 @@ static void show_weather(void)
                                         COLOR_MUTED, 8, 40, 124, 24,
                                         LV_TEXT_ALIGN_CENTER);
 
-    lv_obj_t *refresh_button = make_button(root, "刷新", COLOR_WEATHER, COLOR_WEATHER_2,
-                                           12, 66, 108, 42,
-                                           weather_refresh_event, NULL);
-    lv_obj_set_style_text_font(lv_obj_get_child(refresh_button, 0), FONT_CJK, 0);
+    make_button(root, "刷新", COLOR_WEATHER, COLOR_WEATHER_2, 12, 66, 108, 42,
+                weather_refresh_event, NULL);
     make_button(root, "返回", COLOR_CHINESE, COLOR_CHINESE_2, 12, 116, 108, 44,
                 home_event, NULL);
 
@@ -1228,47 +1211,12 @@ static void show_menu(void)
     }
 }
 
-static void button_sound_switch_event(lv_event_t *event)
-{
-    lv_obj_t *sound_switch = lv_event_get_target_obj(event);
-    const bool was_enabled = app_settings_button_sound_enabled();
-    const bool enabled = !was_enabled;
-
-    /* The touch controller can briefly report RELEASED while a finger is still
-     * down.  LVGL's checkable switch would then see two clicks and immediately
-     * undo the first one.  Toggle explicitly on the first press and suppress
-     * input until the controller has reported a stable release. */
-    board_display_block_touch_until_release();
-    if (was_enabled) {
-        alarm_audio_click();
-    }
-    const esp_err_t err = app_settings_set_button_sound(enabled);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "save button sound setting failed: %s", esp_err_to_name(err));
-        return;
-    }
-    if (enabled) {
-        lv_obj_add_state(sound_switch, LV_STATE_CHECKED);
-    } else {
-        lv_obj_remove_state(sound_switch, LV_STATE_CHECKED);
-    }
-    lv_obj_send_event(sound_switch, LV_EVENT_VALUE_CHANGED, NULL);
-    if (!was_enabled && enabled) {
-        alarm_audio_click();
-    }
-    if (s_sound_status_label != NULL) {
-        lv_label_set_text(s_sound_status_label, enabled ? "已开启" : "已关闭");
-        lv_obj_set_style_text_color(s_sound_status_label,
-                                    lv_color_hex(enabled ? COLOR_BREAK : COLOR_MUTED), 0);
-    }
-}
-
 static void volume_slider_event(lv_event_t *event)
 {
     lv_obj_t *slider = lv_event_get_target_obj(event);
     const uint8_t volume = (uint8_t)lv_slider_get_value(slider);
     if (lv_event_get_code(event) == LV_EVENT_VALUE_CHANGED) {
-        alarm_audio_set_volume(volume);
+        alarm_audio_set_volume(volume < 10 ? 0 : volume);
         if (s_volume_label != NULL) {
             char text[20];
             snprintf(text, sizeof(text), "音量 %u%%", volume);
@@ -1279,7 +1227,7 @@ static void volume_slider_event(lv_event_t *event)
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "save volume failed: %s", esp_err_to_name(err));
         }
-        if (app_settings_button_sound_enabled()) {
+        if (volume >= 10) {
             alarm_audio_click();
         }
     }
@@ -1342,62 +1290,41 @@ static void auto_lock_timeout_event(lv_event_t *event)
     lv_display_trigger_activity(NULL);
 }
 
-static void lock_now_event(lv_event_t *event)
-{
-    (void)event;
-    enter_lock_mode();
-}
-
 static void show_settings(void)
 {
     s_screen = SCREEN_SETTINGS;
     lv_obj_t *root = prepare_screen();
-    make_label(root, "设置", FONT_CJK_BOLD, COLOR_TEXT, 12, 10, 126, 30,
-               LV_TEXT_ALIGN_CENTER);
-    lv_obj_t *gear = add_image_icon(root, &ui_icon_gear, 47, 32);
-    lv_image_set_scale(gear, 176);
-    make_button(root, "每科时长", COLOR_MATH, COLOR_MATH_2, 20, 76, 110, 34,
-                focus_settings_event, NULL);
-    make_button(root, "返回", COLOR_PANEL, COLOR_PANEL_DARK, 24, 119, 102, 39,
-                menu_event, NULL);
+    static const int card_x[] = {8, 134, 260, 386, 512};
 
-    lv_obj_t *panel = make_panel(root, 157, 8, 455, 156, COLOR_CHINESE, COLOR_PANEL_DARK);
-    lv_obj_t *sound_row = make_settings_row(panel, 0);
-    make_settings_icon(sound_row, LV_SYMBOL_AUDIO, COLOR_ENGLISH);
-    lv_obj_t *sound_title = make_label(sound_row, "按键声音", FONT_CJK, COLOR_TEXT,
-                                        0, 0, 105, 24, LV_TEXT_ALIGN_LEFT);
-    lv_obj_align(sound_title, LV_ALIGN_LEFT_MID, 54, 0);
-    s_sound_status_label = make_label(sound_row,
-                                      app_settings_button_sound_enabled() ? "已开启" : "已关闭",
-                                      FONT_CJK,
-                                      app_settings_button_sound_enabled() ? COLOR_BREAK : COLOR_MUTED,
-                                      0, 0, 90, 24, LV_TEXT_ALIGN_LEFT);
-    lv_obj_align(s_sound_status_label, LV_ALIGN_LEFT_MID, 164, 0);
+    lv_obj_t *focus_card = lv_button_create(root);
+    lv_obj_set_pos(focus_card, card_x[0], 8);
+    lv_obj_set_size(focus_card, 120, 156);
+    style_surface(focus_card, COLOR_MATH, COLOR_MATH_2, 14, 2);
+    lv_obj_add_event_cb(focus_card, touch_sound_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(focus_card, focus_settings_event, LV_EVENT_PRESSED, NULL);
+    add_image_icon(focus_card, &ui_icon_settings_duration, 30, 4);
+    make_label(focus_card, "每科时长", FONT_CJK_BOLD, COLOR_TEXT,
+               4, 66, 112, 26, LV_TEXT_ALIGN_CENTER);
+    char focus_values[20];
+    snprintf(focus_values, sizeof(focus_values), "%u/%u/%u",
+             (unsigned)app_settings_focus_minutes(0),
+             (unsigned)app_settings_focus_minutes(1),
+             (unsigned)app_settings_focus_minutes(2));
+    make_label(focus_card, focus_values, FONT_VALUE, COLOR_TEXT,
+               4, 96, 112, 25, LV_TEXT_ALIGN_CENTER);
+    make_label(focus_card, "语  数  英", FONT_CJK, COLOR_MATH,
+               4, 126, 112, 22, LV_TEXT_ALIGN_CENTER);
 
-    lv_obj_t *sound_switch = lv_switch_create(sound_row);
-    lv_obj_set_size(sound_switch, 68, 30);
-    lv_obj_align(sound_switch, LV_ALIGN_RIGHT_MID, -14, 0);
-    lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_BREAK),
-                              LV_PART_INDICATOR | LV_STATE_CHECKED);
-    lv_obj_set_style_bg_color(sound_switch, lv_color_hex(COLOR_TEXT), LV_PART_KNOB);
-    lv_obj_remove_flag(sound_switch, LV_OBJ_FLAG_CHECKABLE);
-    if (app_settings_button_sound_enabled()) {
-        lv_obj_add_state(sound_switch, LV_STATE_CHECKED);
-    }
-    lv_obj_add_event_cb(sound_switch, button_sound_switch_event, LV_EVENT_PRESSED, NULL);
-
-    make_shape(panel, 20, 38, 405, 1, COLOR_CHINESE, LV_OPA_40, 0);
-    lv_obj_t *volume_row = make_settings_row(panel, 39);
-    make_settings_icon(volume_row, LV_SYMBOL_VOLUME_MAX, COLOR_BREAK);
+    lv_obj_t *volume_card = make_panel(root, card_x[1], 8, 120, 156,
+                                       COLOR_BREAK, COLOR_BREAK_2);
+    add_image_icon(volume_card, &ui_icon_settings_volume, 30, 5);
     char volume_text[20];
     snprintf(volume_text, sizeof(volume_text), "音量 %u%%", app_settings_volume());
-    s_volume_label = make_label(volume_row, volume_text, FONT_CJK, COLOR_TEXT, 0, 0, 105, 24,
-                                LV_TEXT_ALIGN_LEFT);
-    lv_obj_align(s_volume_label, LV_ALIGN_LEFT_MID, 54, 0);
-    lv_obj_t *volume_slider = lv_slider_create(volume_row);
-    lv_obj_set_size(volume_slider, 252, 16);
-    lv_obj_align(volume_slider, LV_ALIGN_LEFT_MID, 166, 0);
+    s_volume_label = make_label(volume_card, volume_text, FONT_CJK_BOLD, COLOR_TEXT,
+                                4, 75, 112, 27, LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *volume_slider = lv_slider_create(volume_card);
+    lv_obj_set_pos(volume_slider, 14, 124);
+    lv_obj_set_size(volume_slider, 92, 12);
     lv_slider_set_range(volume_slider, 0, 100);
     lv_slider_set_value(volume_slider, app_settings_volume(), LV_ANIM_OFF);
     lv_obj_set_style_bg_color(volume_slider, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
@@ -1407,18 +1334,17 @@ static void show_settings(void)
     lv_obj_add_event_cb(volume_slider, volume_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(volume_slider, volume_slider_event, LV_EVENT_RELEASED, NULL);
 
-    make_shape(panel, 20, 77, 405, 1, COLOR_CHINESE, LV_OPA_40, 0);
-    lv_obj_t *brightness_row = make_settings_row(panel, 78);
-    make_settings_icon(brightness_row, LV_SYMBOL_EYE_OPEN, COLOR_MATH);
+    lv_obj_t *brightness_card = make_panel(root, card_x[2], 8, 120, 156,
+                                           COLOR_WEATHER, COLOR_WEATHER_2);
+    add_image_icon(brightness_card, &ui_icon_settings_brightness, 30, 5);
     char brightness_text[20];
     snprintf(brightness_text, sizeof(brightness_text), "屏幕 %u%%",
              app_settings_brightness());
-    s_brightness_label = make_label(brightness_row, brightness_text, FONT_CJK, COLOR_TEXT,
-                                    0, 0, 105, 24, LV_TEXT_ALIGN_LEFT);
-    lv_obj_align(s_brightness_label, LV_ALIGN_LEFT_MID, 54, 0);
-    lv_obj_t *brightness_slider = lv_slider_create(brightness_row);
-    lv_obj_set_size(brightness_slider, 252, 16);
-    lv_obj_align(brightness_slider, LV_ALIGN_LEFT_MID, 166, 0);
+    s_brightness_label = make_label(brightness_card, brightness_text, FONT_CJK_BOLD,
+                                    COLOR_TEXT, 4, 78, 112, 27, LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *brightness_slider = lv_slider_create(brightness_card);
+    lv_obj_set_pos(brightness_slider, 14, 132);
+    lv_obj_set_size(brightness_slider, 92, 12);
     lv_slider_set_range(brightness_slider, 10, 100);
     lv_slider_set_value(brightness_slider, app_settings_brightness(), LV_ANIM_OFF);
     lv_obj_set_style_bg_color(brightness_slider, lv_color_hex(COLOR_PANEL), LV_PART_MAIN);
@@ -1428,19 +1354,27 @@ static void show_settings(void)
     lv_obj_add_event_cb(brightness_slider, brightness_slider_event, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(brightness_slider, brightness_slider_event, LV_EVENT_RELEASED, NULL);
 
-    make_shape(panel, 20, 116, 405, 1, COLOR_CHINESE, LV_OPA_40, 0);
-    lv_obj_t *lock_row = make_settings_row(panel, 117);
-    make_settings_icon(lock_row, LV_SYMBOL_POWER, COLOR_WIFI);
-    lv_obj_t *lock_title = make_label(lock_row, "自动锁屏", FONT_CJK, COLOR_TEXT,
-                                      0, 0, 100, 24, LV_TEXT_ALIGN_LEFT);
-    lv_obj_align(lock_title, LV_ALIGN_LEFT_MID, 54, 0);
-    lv_obj_t *timeout_button = make_button(lock_row,
+    lv_obj_t *lock_card = make_panel(root, card_x[3], 8, 120, 156,
+                                     COLOR_ENGLISH, COLOR_ENGLISH_2);
+    add_image_icon(lock_card, &ui_icon_settings_lock, 30, 4);
+    make_label(lock_card, "自动锁屏", FONT_CJK_BOLD, COLOR_TEXT,
+               4, 72, 112, 27, LV_TEXT_ALIGN_CENTER);
+    lv_obj_t *timeout_button = make_button(lock_card,
                                            auto_lock_timeout_text(app_settings_auto_lock_minutes()),
-                                           COLOR_WIFI, COLOR_WIFI_2, 157, 4, 112, 31,
+                                           COLOR_WIFI, COLOR_WIFI_2, 10, 111, 100, 34,
                                            auto_lock_timeout_event, NULL);
     s_auto_lock_label = lv_obj_get_child(timeout_button, 0);
-    make_button(lock_row, "立即锁屏", COLOR_CHINESE, COLOR_CHINESE_2, 307, 4, 128, 31,
-                lock_now_event, NULL);
+    lv_obj_set_style_text_font(s_auto_lock_label, FONT_CJK_SMALL_BOLD, 0);
+
+    lv_obj_t *back_card = lv_button_create(root);
+    lv_obj_set_pos(back_card, card_x[4], 8);
+    lv_obj_set_size(back_card, 120, 156);
+    style_surface(back_card, COLOR_CHINESE, COLOR_CHINESE_2, 14, 2);
+    lv_obj_add_event_cb(back_card, touch_sound_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(back_card, menu_event, LV_EVENT_PRESSED, NULL);
+    add_image_icon(back_card, &ui_icon_settings_back, 30, 28);
+    make_label(back_card, "返回", FONT_CJK_BOLD, COLOR_TEXT,
+               4, 104, 112, 30, LV_TEXT_ALIGN_CENTER);
 }
 
 static void show_focus_settings(void)
@@ -1595,7 +1529,7 @@ static void schedule_swipe_event(lv_event_t *event)
     if (s_schedule_day == old_day) {
         return;
     }
-    if (app_settings_button_sound_enabled()) {
+    if (app_settings_volume() >= 10) {
         alarm_audio_click();
     }
     lv_async_call(schedule_refresh_async, NULL);
@@ -2124,7 +2058,7 @@ static void unlock_screen_event(lv_event_t *event)
     }
 
     s_unlock_long_press_confirmed = false;
-    if (app_settings_button_sound_enabled()) {
+    if (app_settings_volume() >= 10) {
         alarm_audio_click();
     }
     board_display_block_touch_until_release();
@@ -2139,29 +2073,27 @@ static void show_lock_screen(void)
     s_screen = SCREEN_LOCK;
     lv_obj_t *root = prepare_screen();
 
-    lv_obj_t *lock_badge = make_panel(root, 22, 25, 112, 122, COLOR_WIFI, COLOR_WIFI_2);
-    make_label(lock_badge, LV_SYMBOL_EYE_CLOSE, FONT_CLOCK, COLOR_TEXT, 6, 14, 100, 45,
-               LV_TEXT_ALIGN_CENTER);
-    make_label(lock_badge, "睡眠锁屏", FONT_CJK_BOLD, COLOR_TEXT, 6, 74, 100, 28,
+    lv_obj_t *lock_badge = make_panel(root, 8, 8, 128, 156, COLOR_WIFI, COLOR_WIFI_2);
+    add_image_icon(lock_badge, &ui_icon_settings_lock, 34, 18);
+    make_label(lock_badge, "睡眠锁屏", FONT_CJK_BOLD, COLOR_TEXT, 6, 103, 116, 30,
                LV_TEXT_ALIGN_CENTER);
 
-    s_lock_clock_label = make_label(root, "--:--", FONT_TIMER, COLOR_TEXT, 151, 24, 236, 64,
-                                    LV_TEXT_ALIGN_CENTER);
-    s_lock_status_label = make_label(root, "已锁屏", FONT_CJK, COLOR_BREAK, 145, 104, 248, 28,
+    s_lock_clock_label = make_label(root, "--:--", FONT_LOCK_CLOCK, COLOR_TEXT,
+                                     146, 38, 348, 72,
                                      LV_TEXT_ALIGN_CENTER);
+    s_lock_status_label = make_label(root, "已锁屏", FONT_CJK, COLOR_BREAK,
+                                     146, 118, 348, 28,
+                                      LV_TEXT_ALIGN_CENTER);
 
     lv_obj_t *unlock = lv_button_create(root);
-    lv_obj_set_pos(unlock, 420, 30);
-    lv_obj_set_size(unlock, 198, 88);
+    lv_obj_set_pos(unlock, 504, 8);
+    lv_obj_set_size(unlock, 128, 156);
     style_surface(unlock, COLOR_CHINESE, COLOR_CHINESE_2, 15, 2);
     lv_obj_add_event_cb(unlock, unlock_screen_event, LV_EVENT_LONG_PRESSED, NULL);
     lv_obj_add_event_cb(unlock, unlock_screen_event, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(unlock, unlock_screen_event, LV_EVENT_PRESS_LOST, NULL);
-    make_label(unlock, LV_SYMBOL_POWER, FONT_VALUE, COLOR_TEXT, 8, 12, 42, 32,
-               LV_TEXT_ALIGN_CENTER);
-    make_label(unlock, "长按解锁", FONT_CJK_BOLD, COLOR_TEXT, 47, 15, 132, 30,
-               LV_TEXT_ALIGN_CENTER);
-    make_label(root, "短按 PWR 可再次熄屏", FONT_CJK, COLOR_MUTED, 421, 130, 196, 23,
+    add_image_icon(unlock, &ui_icon_lock_unlock, 34, 18);
+    make_label(unlock, "长按解锁", FONT_CJK_BOLD, COLOR_TEXT, 6, 103, 116, 30,
                LV_TEXT_ALIGN_CENTER);
     update_lock_screen_status();
 }

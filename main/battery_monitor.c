@@ -11,7 +11,8 @@
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_3
 #define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
 #define BATTERY_DIVIDER_RATIO 3
-#define BATTERY_SAMPLE_COUNT 8
+#define BATTERY_SAMPLE_COUNT 16
+#define BATTERY_TRIM_COUNT 2
 
 static const char *TAG = "battery_monitor";
 static adc_oneshot_unit_handle_t s_adc_handle;
@@ -47,14 +48,17 @@ bool battery_monitor_usb_powered(void)
 
 static uint8_t voltage_to_percent(uint16_t millivolts)
 {
-    /* A deliberately conservative one-cell Li-ion curve. The display is
-     * intended as a useful status indication, not a laboratory fuel gauge. */
+    /* Loaded one-cell Li-ion voltage curve. The ETA6098 terminates near 4.2 V,
+     * while the always-on display and converter make the sampled cell voltage
+     * settle a little lower. Treat 4.15 V as full instead of requiring an
+     * unloaded 4.20 V that the running product rarely reports. */
     static const struct {
         uint16_t millivolts;
         uint8_t percent;
     } curve[] = {
-        {3300, 0}, {3500, 10}, {3650, 25}, {3750, 45},
-        {3850, 65}, {3950, 80}, {4050, 92}, {4200, 100},
+        {3300, 0}, {3500, 6}, {3600, 14}, {3700, 28},
+        {3750, 40}, {3800, 52}, {3850, 64}, {3900, 74},
+        {4000, 88}, {4100, 96}, {4150, 100},
     };
 
     if (millivolts <= curve[0].millivolts) {
@@ -115,15 +119,30 @@ bool battery_monitor_read(uint16_t *millivolts, uint8_t *percent)
         return false;
     }
 
-    uint32_t raw_total = 0;
+    uint16_t samples[BATTERY_SAMPLE_COUNT];
     for (int sample = 0; sample < BATTERY_SAMPLE_COUNT; ++sample) {
         int raw = 0;
         if (adc_oneshot_read(s_adc_handle, BATTERY_ADC_CHANNEL, &raw) != ESP_OK) {
             return false;
         }
-        raw_total += (uint32_t)raw;
+        samples[sample] = (uint16_t)raw;
     }
-    const int raw_average = (int)(raw_total / BATTERY_SAMPLE_COUNT);
+    for (int index = 1; index < BATTERY_SAMPLE_COUNT; ++index) {
+        const uint16_t value = samples[index];
+        int insert = index;
+        while (insert > 0 && samples[insert - 1] > value) {
+            samples[insert] = samples[insert - 1];
+            --insert;
+        }
+        samples[insert] = value;
+    }
+    uint32_t raw_total = 0;
+    for (int index = BATTERY_TRIM_COUNT;
+         index < BATTERY_SAMPLE_COUNT - BATTERY_TRIM_COUNT; ++index) {
+        raw_total += samples[index];
+    }
+    const int retained_samples = BATTERY_SAMPLE_COUNT - 2 * BATTERY_TRIM_COUNT;
+    const int raw_average = (int)(raw_total / retained_samples);
 
     int pin_millivolts = 0;
     if (!s_calibrated ||

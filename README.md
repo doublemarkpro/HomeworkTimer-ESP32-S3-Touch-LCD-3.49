@@ -3,6 +3,21 @@
 面向儿童家庭作业管理的独立 ESP-IDF/LVGL 工程，适配微雪
 `ESP32-S3-Touch-LCD-3.49B`（172 × 640，横屏逻辑分辨率 640 × 172）。
 
+## 界面预览
+
+预览图按照当前 LVGL 代码中的 640 × 172 坐标、色彩和卡片尺寸生成，并直接使用
+固件内置图标。时间、学习统计、天气及 Wi-Fi 名称为展示布局使用的示例数据。
+
+| 主页 | 周报 |
+| --- | --- |
+| ![主页](docs/screenshots/home.png) | ![周报](docs/screenshots/report.png) |
+| 课程表 | 闹钟 |
+| ![课程表](docs/screenshots/schedule.png) | ![闹钟](docs/screenshots/alarm.png) |
+| Wi-Fi | 设置 |
+| ![Wi-Fi](docs/screenshots/wifi.png) | ![设置](docs/screenshots/settings.png) |
+| 三日天气 |  |
+| ![三日天气](docs/screenshots/weather.png) |  |
+
 ## 功能
 
 - 语文、数学、英语分别开始、暂停、继续和完成计时
