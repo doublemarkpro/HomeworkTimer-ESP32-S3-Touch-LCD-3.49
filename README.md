@@ -18,6 +18,18 @@
 | 三日天气 |  |
 | ![三日天气](docs/screenshots/weather.png) |  |
 
+## 真机实拍
+
+以下照片为当前固件在微雪 `ESP32-S3-Touch-LCD-3.49B` 开发板上的实际运行效果。
+
+| 主页与科目入口 | 单科计时 |
+| --- | --- |
+| ![真机主页](docs/hardware/home-screen.jpg) | ![真机单科计时](docs/hardware/subject-timer.jpg) |
+| 三日天气 | 课程表 |
+| ![真机三日天气](docs/hardware/weather-screen.jpg) | ![真机课程表](docs/hardware/schedule-screen.jpg) |
+| 睡眠锁屏 |  |
+| ![真机睡眠锁屏](docs/hardware/lock-screen.jpg) |  |
+
 ## 功能
 
 - 语文、数学、英语分别开始、暂停、继续和完成计时
